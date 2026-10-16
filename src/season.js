@@ -1,13 +1,14 @@
-// Where is the viewer, what season is it there, and what's the weather doing?
+// Where is the viewer, what season is it there, what do the trees look like, and what's the weather?
 
 export const PRESETS = [
   { id: 'seattle', city: 'Seattle', country: 'US', lat: 47.61, lon: -122.33 },
+  { id: 'bangalore', city: 'Bengaluru', country: 'IN', lat: 12.97, lon: 77.59 },
   { id: 'mumbai', city: 'Mumbai', country: 'IN', lat: 19.08, lon: 72.88 },
   { id: 'delhi', city: 'Delhi', country: 'IN', lat: 28.61, lon: 77.21 },
-  { id: 'chennai', city: 'Chennai', country: 'IN', lat: 13.08, lon: 80.27 },
-  { id: 'tokyo', city: 'Tokyo', country: 'JP', lat: 35.68, lon: 139.69 },
-  { id: 'london', city: 'London', country: 'GB', lat: 51.51, lon: -0.13 },
   { id: 'newyork', city: 'New York', country: 'US', lat: 40.71, lon: -74.01 },
+  { id: 'losangeles', city: 'Los Angeles', country: 'US', lat: 34.05, lon: -118.24 },
+  { id: 'london', city: 'London', country: 'GB', lat: 51.51, lon: -0.13 },
+  { id: 'tokyo', city: 'Tokyo', country: 'JP', lat: 35.68, lon: 139.69 },
   { id: 'sydney', city: 'Sydney', country: 'AU', lat: -33.87, lon: 151.21 },
   { id: 'singapore', city: 'Singapore', country: 'SG', lat: 1.35, lon: 103.82 },
   { id: 'nairobi', city: 'Nairobi', country: 'KE', lat: -1.29, lon: 36.82 },
@@ -75,7 +76,6 @@ export function guessFromTimezone() {
   try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone; } catch {}
   const hit = TZ[tz];
   if (hit) return { city: hit[0], country: hit[1], lat: hit[2], lon: hit[3], source: 'timezone' };
-  // Unknown zone: assume a mid-latitude northern city.
   return { city: '', country: '', lat: 40, lon: 0, source: 'default' };
 }
 
@@ -96,61 +96,108 @@ export async function resolvePlace() {
     const r = await fetch('/api/geo', { signal: withTimeout(2500) });
     if (r.ok && (r.headers.get('content-type') || '').includes('json')) {
       const j = await r.json();
-      if (isFinite(j.lat) && isFinite(j.lon)) return { ...j, source: 'ip' };
+      if (isFinite(j.lat) && isFinite(j.lon) && j.lat !== null) return { ...j, source: 'ip' };
     }
   } catch {}
   return guessFromTimezone();
 }
 
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
+const inBox = (lat, lon, [la0, la1, lo0, lo1]) => lat >= la0 && lat <= la1 && lon >= lo0 && lon <= lo1;
 
-// Month as a continuous number: Jan 1 = 0, Dec 31 ≈ 12.
 function monthFloat(d) {
   const days = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
   return d.getMonth() + (d.getDate() - 1) / days;
 }
 
+/*
+ * Regional flora: what the trees overhead actually do each season.
+ *   spring: cherry | pear (white pear + pink cherry + magnolia) | white | jacaranda | trumpet (pink + yellow tabebuia)
+ *           | palash | ipe | fresh (just new leaves)
+ *   summer: green | dry | flame (gulmohar / poinciana) | jacaranda (LA's late-May/June bloom)
+ *   fall:   vivid (maples) | golden (planes, birch: yellow-brown) | mild (mostly evergreen, a few yellow)
+ *   winter: snowy | bare | green
+ *   evergreen: share of trees that are conifers / evergreens.
+ * Sources: KOMO & FOX13 (Seattle foliage), NYBG & 6sqft (NYC spring), LAist (LA jacarandas),
+ * Destination NSW (Sydney jacarandas), South First (Bengaluru pink trumpet trees).
+ */
+const F = (name, spring, summer, fall, winter, evergreen = 0.12) => ({ name, spring, summer, fall, winter, evergreen });
+export function regionFor({ lat, lon }) {
+  if (inBox(lat, lon, [8, 16.5, 74, 80.5])) return { ...F('deccan', 'trumpet', 'flame', 'mild', 'green'), calendar: 'deccan' };
+  if (inBox(lat, lon, [5, 37, 60, 98])) return { ...F('south-asia', 'palash', 'flame', 'mild', 'green'), calendar: 'south-asia' };
+  if (inBox(lat, lon, [-6, 6, 28, 42])) return { ...F('east-africa', 'jacaranda', 'green', 'mild', 'green'), calendar: 'east-africa' };
+  if (Math.abs(lat) < 23.5) return { ...F('tropics', 'flame', 'flame', 'mild', 'green'), calendar: 'tropics' };
+  // North America
+  if (inBox(lat, lon, [42, 55, -126, -119])) return F('pnw', 'cherry', 'green', 'vivid', 'bare', 0.35);
+  if (inBox(lat, lon, [30, 38.5, -125, -114])) return { ...F('california', 'fresh', 'jacaranda', 'mild', 'green', 0.3), calendar: 'california' };
+  if (inBox(lat, lon, [24, 33, -125, -75])) return F('us-south', 'white', 'green', 'golden', 'green', 0.25);
+  if (inBox(lat, lon, [33, 60, -100, -50])) return F('northeast', 'pear', 'green', 'golden', 'snowy');
+  if (inBox(lat, lon, [30, 70, -170, -50])) return F('north-america', 'white', 'green', 'golden', 'snowy', 0.3);
+  // Europe
+  if (inBox(lat, lon, [58, 72, -25, 45])) return F('nordic', 'fresh', 'green', 'golden', 'snowy', 0.35);
+  if (inBox(lat, lon, [34, 44.5, -10, 40])) return F('mediterranean', 'white', 'dry', 'mild', 'green', 0.35);
+  if (inBox(lat, lon, [44.5, 58, -11, 25])) return F('atlantic', 'white', 'green', 'golden', 'bare');
+  if (inBox(lat, lon, [44.5, 70, 25, 60])) return F('east-europe', 'white', 'green', 'golden', 'snowy', 0.25);
+  // East Asia
+  if (inBox(lat, lon, [30, 46, 124, 146])) return F('japan-korea', 'cherry', 'green', 'vivid', 'bare');
+  if (inBox(lat, lon, [22, 46, 100, 124])) return F('china', 'cherry', 'green', 'golden', 'bare');
+  // Southern hemisphere
+  if (inBox(lat, lon, [-38, -24, 140, 155])) return F('east-australia', 'jacaranda', 'dry', 'mild', 'green', 0.4);
+  if (inBox(lat, lon, [-45, -10, 110, 155])) return F('australia', 'white', 'dry', 'mild', 'green', 0.45);
+  if (inBox(lat, lon, [-48, -34, 165, 180])) return F('new-zealand', 'white', 'green', 'golden', 'bare', 0.3);
+  if (inBox(lat, lon, [-35, -15, -60, -34])) return F('brazil', 'ipe', 'green', 'mild', 'green', 0.4);
+  if (inBox(lat, lon, [-35, -20, 15, 35])) return F('south-africa', 'jacaranda', 'dry', 'mild', 'green', 0.35);
+  return F('temperate', 'white', 'green', 'golden', 'bare');
+}
+
 /**
- * Season for a place and date. Returns { key, label, progress (0–1 through the season), variant }.
+ * Season for a place and date: { key, label, progress (0–1 through the season), flora }.
  * key is one of: spring, summer, monsoon, autumn, winter, misty.
  */
-export function seasonFor({ lat, lon, country }, date = new Date()) {
+export function seasonFor(place, date = new Date()) {
+  const { lat, country } = place;
+  const flora = regionFor(place);
   const m = monthFloat(date);
-  const S = (key, label, progress = 0.5, variant) => ({ key, label, progress: clamp01(progress), variant });
+  const S = (key, label, progress = 0.5) => ({ key, label, progress: clamp01(progress), flora });
   const fall = country === 'US' || country === 'CA' ? 'Fall' : 'Autumn';
-  const alat = Math.abs(lat);
 
-  // South Asia: summer → southwest monsoon → post-monsoon → cool misty winter → spring.
-  if (lat > 5 && lat < 37 && lon > 60 && lon < 98) {
-    const seCoast = lat < 14.5 && lon > 77.5; // Tamil Nadu coast + Sri Lanka get the northeast monsoon
+  // Bengaluru & the Deccan: pink trumpet trees Jan–Mar, gulmohar Apr–May, two monsoons, cool Dec.
+  if (flora.calendar === 'deccan') {
+    if (m < 3.3) return S('spring', 'Pink trumpet season', m / 3.3);
+    if (m < 5.1) return S('summer', 'Summer', (m - 3.3) / 1.8);
+    if (m < 9.5) return S('monsoon', 'Southwest monsoon', (m - 5.1) / 4.4);
+    if (m < 11.5) return S('monsoon', 'Northeast monsoon', (m - 9.5) / 2);
+    return S('misty', 'Winter', (m - 11.5) / 0.5);
+  }
+  // Rest of South Asia: palash spring, gulmohar summer, southwest monsoon, misty winter.
+  if (flora.calendar === 'south-asia') {
     if (m >= 5 && m < 9.5) return S('monsoon', 'Monsoon', (m - 5) / 4.5);
-    if (seCoast && m >= 9.5) return S('monsoon', 'Northeast monsoon', (m - 9.5) / 2.5);
     if (m >= 9.5 && m < 11) return S('summer', 'Post-monsoon', (m - 9.5) / 1.5);
     if (m >= 11 || m < 1.5) return S('misty', 'Winter', (m >= 11 ? m - 11 : m + 1) / 2.5);
-    if (m < 3) return S('spring', 'Spring', (m - 1.5) / 1.5, 'palash');
-    return S('summer', 'Summer', (m - 3) / 2, 'flame');
+    if (m < 3) return S('spring', 'Spring', (m - 1.5) / 1.5);
+    return S('summer', 'Summer', (m - 3) / 2);
   }
-
-  // Tropics: wet and dry seasons instead of four.
-  if (alat < 23.5) {
-    if (alat < 4) return S('summer', 'Tropical', 0.5);
+  // Nairobi & highlands: long rains Mar–May, jacaranda + short rains Oct–Nov.
+  if (flora.calendar === 'east-africa') {
+    if (m >= 2 && m < 5.5) return S('monsoon', 'Long rains', (m - 2) / 3.5);
+    if (m >= 9 && m < 11.5) return S('spring', 'Jacaranda season', (m - 9) / 2.5);
+    return S('summer', 'Dry season', 0.5);
+  }
+  if (flora.calendar === 'tropics') {
+    if (Math.abs(lat) < 4) return S('summer', 'Tropical', 0.5);
     const north = lat > 0;
     const wet = north ? m >= 4.5 && m < 10 : m >= 10.5 || m < 3.5;
-    if (wet) {
-      const p = north ? (m - 4.5) / 5.5 : (m >= 10.5 ? m - 10.5 : m + 1.5) / 5;
-      return S('monsoon', 'Rainy season', p);
-    }
-    return S('summer', 'Dry season', 0.5, 'flame');
+    if (wet) return S('monsoon', 'Rainy season', north ? (m - 4.5) / 5.5 : (m >= 10.5 ? m - 10.5 : m + 1.5) / 5);
+    return S('summer', 'Dry season', 0.5);
   }
-
-  // East Asian plum-rain season (tsuyu / meiyu / jangma).
-  if (lat > 22 && lat < 42 && lon > 100 && lon < 146 && m >= 5.3 && m < 6.7) {
+  // East Asian plum-rain season.
+  if ((flora.name === 'japan-korea' || flora.name === 'china') && m >= 5.3 && m < 6.7) {
     return S('monsoon', 'Rainy season', (m - 5.3) / 1.4);
   }
 
-  // Temperate and subpolar: flip six months in the southern hemisphere.
+  // Temperate: flip six months in the southern hemisphere.
   const mm = lat < 0 ? (m + 6) % 12 : m;
-  if (alat >= 58) {
+  if (Math.abs(lat) >= 58) {
     if (mm >= 10 || mm < 3.5) return S('winter', 'Winter', (mm >= 10 ? mm - 10 : mm + 2) / 5.5);
     if (mm < 5.5) return S('spring', 'Spring', (mm - 3.5) / 2);
     if (mm < 8) return S('summer', 'Summer', (mm - 5.5) / 2.5);
@@ -158,45 +205,61 @@ export function seasonFor({ lat, lon, country }, date = new Date()) {
   }
   if (mm >= 11 || mm < 2) return S('winter', 'Winter', (mm >= 11 ? mm - 11 : mm + 1) / 3);
   if (mm < 5) return S('spring', 'Spring', (mm - 2) / 3);
-  if (mm < 8) return S('summer', 'Summer', (mm - 5) / 3);
+  if (mm < 8) return S('summer', flora.summer === 'jacaranda' && mm < 6.5 ? 'Jacaranda season' : 'Summer', (mm - 5) / 3);
   return S('autumn', fall, (mm - 8) / 3);
 }
 
-// Default label for a season picked by hand.
-export function manualSeason(key, country) {
-  const labels = {
-    spring: 'Spring', summer: 'Summer', monsoon: 'Monsoon',
-    autumn: country === 'US' || country === 'CA' ? 'Fall' : 'Autumn', winter: 'Winter', misty: 'Misty winter',
-  };
-  const progress = { spring: 0.35, summer: 0.5, monsoon: 0.5, autumn: 0.6, winter: 0.5, misty: 0.5 };
-  return { key, label: labels[key], progress: progress[key] };
+// A season picked by hand, shown with the trees of the given place.
+export function manualSeason(key, place) {
+  const flora = regionFor(place);
+  const us = place.country === 'US' || place.country === 'CA';
+  const labels = { spring: 'Spring', summer: 'Summer', monsoon: 'Monsoon', autumn: us ? 'Fall' : 'Autumn', winter: 'Winter' };
+  const progress = { spring: 0.35, summer: 0.2, monsoon: 0.5, autumn: 0.65, winter: 0.5 };
+  return { key, label: labels[key], progress: progress[key], flora };
 }
 
-// Live weather from Open-Meteo (free, no key). Returns null on failure.
+const WEATHER_LABELS = {
+  clear: 'clear skies', mostly: 'mostly clear', partly: 'partly cloudy', cloudy: 'overcast', fog: 'foggy',
+  drizzle: 'drizzle', rain: 'rain', heavy: 'heavy rain', storm: 'thunderstorm', snow: 'snow',
+};
+
+function weatherFromCode(code, cloud) {
+  if (code === 0) return 'clear';
+  if (code === 1) return 'mostly';
+  if (code === 2) return 'partly';
+  if (code === 3) return 'cloudy';
+  if (code === 45 || code === 48) return 'fog';
+  if (code >= 51 && code <= 57) return 'drizzle';
+  if (code === 65 || code === 82 || code === 67) return 'heavy';
+  if ((code >= 61 && code <= 66) || (code >= 80 && code <= 81)) return 'rain';
+  if ((code >= 71 && code <= 77) || code === 85 || code === 86) return 'snow';
+  if (code >= 95) return 'storm';
+  return cloud > 70 ? 'cloudy' : 'clear';
+}
+
+// Pretend weather for previews: ?weather=storm etc.
+export function fakeWeather(kind) {
+  if (!WEATHER_LABELS[kind]) return null;
+  const cloud = { clear: 0, mostly: 15, partly: 45, cloudy: 95, fog: 100, drizzle: 90, rain: 100, heavy: 100, storm: 100, snow: 100 }[kind];
+  const precip = { drizzle: 0.3, rain: 2, heavy: 8, storm: 10, snow: 1 }[kind] || 0;
+  return { kind, label: WEATHER_LABELS[kind], temp: 18, cloud, wind: kind === 'storm' ? 35 : 10, precip, isDay: true, fake: true };
+}
+
+// Live conditions from Open-Meteo (free, no key). Returns null on failure.
 export async function fetchWeather(lat, lon) {
   try {
     const u = `https://api.open-meteo.com/v1/forecast?latitude=${lat.toFixed(2)}&longitude=${lon.toFixed(2)}` +
-      `&current=temperature_2m,weather_code,cloud_cover,wind_speed_10m,is_day&timezone=auto`;
+      `&current=temperature_2m,weather_code,cloud_cover,wind_speed_10m,wind_gusts_10m,precipitation,is_day&timezone=auto`;
     const r = await fetch(u, { signal: withTimeout(5000) });
     if (!r.ok) return null;
     const c = (await r.json()).current;
-    const code = c.weather_code;
-    let kind = 'clear', label = 'clear skies';
-    if (code === 1) label = 'mostly clear';
-    else if (code === 2) { kind = 'cloudy'; label = 'partly cloudy'; }
-    else if (code === 3) { kind = 'cloudy'; label = 'overcast'; }
-    else if (code === 45 || code === 48) { kind = 'fog'; label = 'foggy'; }
-    else if (code >= 51 && code <= 57) { kind = 'drizzle'; label = 'drizzle'; }
-    else if ((code >= 61 && code <= 67) || (code >= 80 && code <= 82)) {
-      kind = code === 65 || code === 82 ? 'heavy' : 'rain';
-      label = code === 61 || code === 80 ? 'light rain' : code === 65 || code === 82 ? 'heavy rain' : 'rain';
-    } else if ((code >= 71 && code <= 77) || code === 85 || code === 86) { kind = 'snow'; label = 'snow'; }
-    else if (code >= 95) { kind = 'storm'; label = 'thunderstorm'; }
+    const cloud = c.cloud_cover ?? 0;
+    const kind = weatherFromCode(c.weather_code, cloud);
     return {
-      kind, label, code,
-      temp: Math.round(c.temperature_2m),
-      cloud: c.cloud_cover ?? 0,
-      wind: c.wind_speed_10m ?? 8,
+      kind, label: WEATHER_LABELS[kind], code: c.weather_code,
+      temp: c.temperature_2m, cloud,
+      wind: Math.max(c.wind_speed_10m ?? 8, (c.wind_gusts_10m ?? 0) * 0.6),
+      precip: c.precipitation ?? 0,
       isDay: c.is_day === 1,
     };
   } catch {

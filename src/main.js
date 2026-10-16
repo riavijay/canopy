@@ -1,18 +1,26 @@
 import { Canopy } from './scene.js';
 import { buildScene } from './palettes.js';
 import { Ambience } from './audio.js';
-import { PRESETS, resolvePlace, guessFromTimezone, seasonFor, manualSeason, fetchWeather } from './season.js';
+import { PRESETS, resolvePlace, guessFromTimezone, seasonFor, manualSeason, fetchWeather, fakeWeather } from './season.js';
 
 const $ = (id) => document.getElementById(id);
 const canopy = new Canopy($('c'));
 const audio = new Ambience();
 canopy.onThunder = (d) => audio.thunder(d);
+if (import.meta.env.DEV) window.__canopy = canopy;
 
 // ---------- state ----------
 // home: where the visitor is. view: what's on screen (home, another city, or a hand-picked season).
 let home = null;
 let view = null;
 const weatherCache = new Map();
+const query = new URLSearchParams(location.search);
+const forcedWeather = fakeWeather(query.get('weather')); // ?weather=storm etc. for previews
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch {} },
+};
+let units = store.get('canopy-units'); // 'C' | 'F', or null until we know where you are
 
 function show(next, instant = false) {
   view = next;
@@ -25,7 +33,7 @@ function show(next, instant = false) {
 
 async function placeView(place, mode) {
   const season = seasonFor(place);
-  const v = { place, season, weather: weatherCache.get(place.city) || null, mode };
+  const v = { place, season, weather: forcedWeather || weatherCache.get(place.city) || null, mode };
   if (!v.weather) {
     fetchWeather(place.lat, place.lon).then((w) => {
       if (!w) return;
@@ -39,17 +47,18 @@ async function placeView(place, mode) {
 }
 
 // ---------- chip + panel ----------
-const unit = (country) => (country === 'US' ? 'F' : 'C');
-const temp = (w, country) => (unit(country) === 'F' ? Math.round(w.temp * 9 / 5 + 32) : w.temp);
+const FAHRENHEIT = ['US', 'LR', 'MM', 'BS', 'BZ', 'KY', 'PW'];
+const unit = () => units || (home && FAHRENHEIT.includes(home.place.country) ? 'F' : 'C');
+const temp = (w) => `${Math.round(unit() === 'F' ? (w.temp * 9) / 5 + 32 : w.temp)}°${unit()}`;
 
 function renderChip() {
   const { place, season, weather, mode } = view;
   $('city').textContent = place.city ? `${place.city} ·` : '';
   $('season').textContent = season.label;
   let sub = '';
-  if (mode === 'manual') sub = 'Previewing · tap to go back';
-  else if (weather) sub = `${weather.label}, ${temp(weather, place.country)}°${unit(place.country)}`;
-  else sub = mode === 'home' ? 'your sky right now' : 'right now';
+  if (mode === 'manual') sub = 'Daydreaming · tap to come back';
+  else if (weather) sub = `${weather.label}, ${temp(weather)}`;
+  else sub = mode === 'home' ? 'your sky right now' : 'checking the sky…';
   $('sub').textContent = sub;
 }
 
@@ -59,12 +68,12 @@ function renderPanel() {
   const seasons = $('seasons');
   seasons.textContent = '';
   if (home) {
-    const b = pill(`Yours · ${home.season.label}`, view.mode === 'home', () => show({ ...home, weather: weatherCache.get(home.place.city) || home.weather, mode: 'home' }));
+    const b = pill(`☀︎ My sky · ${home.season.label}`, view.mode === 'home', () => show({ ...home, weather: forcedWeather || weatherCache.get(home.place.city) || home.weather, mode: 'home' }));
     b.classList.add('home');
     seasons.append(b);
   }
   for (const key of SEASONS) {
-    const s = manualSeason(key, home ? home.place.country : '');
+    const s = manualSeason(key, view.place);
     seasons.append(pill(s.label, view.mode === 'manual' && view.season.key === key, () => {
       show({ place: view.place, season: s, weather: null, mode: 'manual' });
     }));
@@ -79,9 +88,9 @@ function renderPanel() {
   }
   const src = home && home.place.source;
   $('note').textContent =
-    src === 'ip' ? 'Your season comes from your approximate location and today’s date. Weather from Open-Meteo.'
-    : src === 'timezone' ? 'Guessing your location from your timezone. Weather from Open-Meteo.'
-    : 'Weather from Open-Meteo.';
+    (src === 'timezone' ? 'We guessed your city from your timezone. ' : 'Your sky follows roughly where you are and today’s date. ') +
+    'Live weather by Open-Meteo.';
+  for (const b of document.querySelectorAll('#units button')) b.setAttribute('aria-pressed', String(b.dataset.u === unit()));
 }
 
 function pill(label, pressed, onClick) {
@@ -101,12 +110,21 @@ function togglePanel(open = !panel.classList.contains('open')) {
 chip.addEventListener('click', (e) => {
   e.stopPropagation();
   if (view && view.mode === 'manual' && !panel.classList.contains('open') && home) {
-    show({ ...home, weather: weatherCache.get(home.place.city) || home.weather, mode: 'home' });
+    show({ ...home, weather: forcedWeather || weatherCache.get(home.place.city) || home.weather, mode: 'home' });
     return;
   }
   togglePanel();
 });
 panel.addEventListener('pointerdown', (e) => e.stopPropagation());
+for (const b of document.querySelectorAll('#units button')) {
+  b.addEventListener('click', (e) => {
+    e.stopPropagation();
+    units = b.dataset.u;
+    store.set('canopy-units', units);
+    renderChip();
+    renderPanel();
+  });
+}
 addEventListener('keydown', (e) => { if (e.key === 'Escape') togglePanel(false); });
 
 // ---------- sound ----------
@@ -176,7 +194,7 @@ function frame(now) {
   const place = await resolvePlace();
   home = await placeView(place, 'home');
   const sameSeason = home.season.key === view.season.key && home.season.variant === view.season.variant;
-  const forced = new URLSearchParams(location.search).get('season');
-  if (SEASONS.includes(forced)) show({ place, season: manualSeason(forced, place.country), weather: null, mode: 'manual' }, true);
+  const forced = query.get('season');
+  if (SEASONS.includes(forced)) show({ place, season: manualSeason(forced, place), weather: forcedWeather, mode: forcedWeather ? 'city' : 'manual' }, true);
   else show(home, sameSeason);
 })();

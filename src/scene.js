@@ -1,11 +1,11 @@
-// The canopy: procedurally grown trees seen from below, wind physics, particles, light.
+// The canopy: procedurally grown trees seen from below, drawn in a flat illustrated style,
+// with wind physics, falling leaves / petals / rain / snow, birds and clouds.
 import { css, mixC, blendEnv } from './palettes.js';
 
 const TAU = Math.PI * 2;
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const lerp = (a, b, t) => a + (b - a) * t;
 const ease = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
-const LIGHT = { x: 0.55, y: -0.835 }; // direction the sunlight comes from, for shading clusters
 
 export function mulberry32(a) {
   return function () {
@@ -34,6 +34,24 @@ function almond(path, x, y, len, wid, a) {
   path.closePath();
 }
 
+// A lumpy blob with a scalloped, cloud-like edge — the basic leaf mass of the illustration.
+function scallop(path, ox, oy, R, shape, grow = 0, scale = 1) {
+  const n = shape.angles.length;
+  const pts = shape.angles.map((a, i) => {
+    const r = R * shape.radii[i] * scale + grow;
+    return { x: ox + Math.cos(a) * r, y: oy + Math.sin(a) * r, a, r };
+  });
+  path.moveTo(pts[0].x, pts[0].y);
+  for (let i = 0; i < n; i++) {
+    const p = pts[i], q = pts[(i + 1) % n];
+    const am = p.a + ((q.a - p.a + TAU) % TAU) / 2;
+    const chord = Math.hypot(q.x - p.x, q.y - p.y);
+    const rm = (p.r + q.r) / 2 + chord * 0.42;
+    path.quadraticCurveTo(ox + Math.cos(am) * rm, oy + Math.sin(am) * rm, q.x, q.y);
+  }
+  path.closePath();
+}
+
 const LEAF = (() => { const p = new Path2D(); almond(p, 0, 0, 1, 0.46, 0); return p; })();
 const PETAL = (() => { const p = new Path2D(); p.ellipse(0, 0, 0.5, 0.36, 0, 0, TAU); return p; })();
 
@@ -49,11 +67,13 @@ export class Canopy {
     this.birds = [];
     this.droplets = [];
     this.flash = 0;
-    this.birdTimer = 3;
+    this.birdTimer = 2;
     this.spawnAcc = { leaf: 0, petal: 0, snow: 0, rain: 0 };
     this.windEnergy = 0;
+    this.wind = { x: 1, y: 0, g: 0.5 };
     this.onThunder = null;
     this.scene = null;
+    this.mix = 1;
     this.resize();
   }
 
@@ -80,7 +100,6 @@ export class Canopy {
     return e * (1 + 0.2 * Math.sin(2 * phi + p[0]) + 0.15 * Math.sin(3 * phi + p[1]) + 0.1 * Math.sin(5 * phi + p[2]) + 0.05 * Math.sin(8 * phi + p[0] * 2));
   }
 
-  // How far outside the sky hole a point sits (1 = on the edge).
   holeRatio(x, y) {
     const dx = x - this.cx, dy = y - this.cy;
     return Math.hypot(dx, dy) / this.holeR(Math.atan2(dy, dx));
@@ -92,187 +111,172 @@ export class Canopy {
     const m = Math.min(W, H), M = Math.max(W, H);
     this.m = m; this.M = M;
     this.cx = W / 2; this.cy = H * 0.49;
-    this.hole = { a: 0.15 * W + 0.06 * m, b: 0.15 * H + 0.06 * m, p: [r() * TAU, r() * TAU, r() * TAU] };
+    // Tall sky opening on portrait screens, like the reference; wider on landscape.
+    this.hole = { a: 0.13 * W + 0.06 * m, b: 0.17 * H + 0.05 * m, p: [r() * TAU, r() * TAU, r() * TAU] };
+    this.trees = []; this.clusters = []; this.groups = []; this.clouds = [];
+    if (W <= 0 || H <= 0) return;
     const depthFactor = (x, y) => clamp(Math.hypot(x - this.cx, y - this.cy) / (0.6 * M), 0, 1.3);
 
-    // Trees lean in from beyond the frame edges toward the open sky.
-    const n = clamp(Math.round((2 * (W + H)) / (0.55 * m + 0.25 * M)), 6, 10);
+    // Trunks lean in from beyond the frame edges toward the open sky.
+    const n = clamp(Math.round((2 * (W + H)) / (0.6 * m + 0.3 * M)), 5, 9);
     const off = r() * TAU;
-    this.trees = [];
     for (let i = 0; i < n; i++) {
       const theta = off + ((i + (r() - 0.5) * 0.5) / n) * TAU;
       const dx = Math.cos(theta), dy = Math.sin(theta);
       const dEdge = Math.min(Math.abs((W / 2) * 1.04 / (dx || 1e-6)), Math.abs((H / 2) * 1.04 / (dy || 1e-6)));
-      const base = { x: this.cx + dx * dEdge * 1.1, y: this.cy + dy * dEdge * 1.1 };
-      const tipD = this.holeR(theta) * (1.45 + 0.3 * r());
+      const base = { x: this.cx + dx * dEdge * 1.12, y: this.cy + dy * dEdge * 1.12 };
+      const tipD = this.holeR(theta) * (1.4 + 0.3 * r());
       const tip = { x: this.cx + dx * tipD, y: this.cy + dy * tipD };
       const len = Math.hypot(tip.x - base.x, tip.y - base.y);
-      const bend = (r() - 0.5) * 0.3 * len;
+      const bend = (r() - 0.5) * 0.25 * len;
       const ctrl = { x: (base.x + tip.x) / 2 - dy * bend, y: (base.y + tip.y) / 2 + dx * bend };
       const tree = {
-        i, r: r(), theta, len, sx: 0, sy: 0, vx: 0, vy: 0,
-        w0: m * (0.08 + 0.04 * r()), w1: m * 0.026,
+        i, r: r(), r2: r(), theta, len, sx: 0, sy: 0, vx: 0, vy: 0,
+        w0: m * (0.085 + 0.04 * r()), w1: m * 0.03,
         mid: { x: (base.x + tip.x * 2) / 3, y: (base.y + tip.y * 2) / 3 },
         branches: [], nodes: [],
       };
       tree.trunk = quad(base, ctrl, tip, 16).map((p, k) => ({ ...p, s: k / 16, df: depthFactor(p.x, p.y) }));
+      tree.nodes.push({ x: tip.x, y: tip.y, s: 1, depth: 0, tree });
       this.trees.push(tree);
 
+      // Main limbs fan out from the upper trunk toward the crown edge.
       const nb = 4 + Math.floor(r() * 3);
       for (let j = 0; j < nb; j++) {
-        const t = 0.3 + (0.7 * (j + r() * 0.6)) / nb;
+        const t = 0.28 + (0.64 * (j + r() * 0.7)) / nb;
         const k = Math.min(15, Math.floor(t * 16));
         const p = tree.trunk[k], q = tree.trunk[k + 1];
         const ang = Math.atan2(q.y - p.y, q.x - p.x);
         const side = j % 2 ? 1 : -1;
-        const w = lerp(tree.w0, tree.w1, Math.pow(t, 0.8)) * 0.55;
-        this.grow(tree, r, p, ang + side * (0.2 + r() * 0.5), len * (0.38 + 0.2 * r()) * (1.2 - 0.4 * t), w, 1, t, depthFactor);
+        const w = lerp(tree.w0, tree.w1, Math.pow(t, 0.8)) * 0.5;
+        this.grow(tree, r, p, ang + side * (0.4 + r() * 0.5), len * (0.36 + 0.2 * r()) * (1.2 - 0.5 * t), w, 1, t, depthFactor);
       }
     }
 
-    // Leaf clusters: one at many branch tips, plus a fill pass so the canopy reads as a full ring.
-    this.clusters = [];
+    // Leaf masses: a jittered grid outside the sky opening, each owned by the nearest tree.
     const allNodes = this.trees.flatMap((t) => t.nodes);
-    const addCluster = (x, y, rad, node, top) => {
-      const c = this.makeCluster(r, x, y, rad, node, top);
-      c.df = depthFactor(x, y);
-      this.clusters.push(c);
-    };
-    for (const nd of allNodes) {
-      if ((nd.depth === 2 || nd.depth === 3) && r() < 0.4 && this.holeRatio(nd.x, nd.y) > 0.8) {
-        addCluster(nd.x, nd.y, m * (0.045 + 0.03 * r()) * (nd.depth === 2 ? 1.2 : 1), nd, nd.depth === 3);
-      }
-    }
-    const cell = 0.11 * m;
+    const cell = 0.12 * m;
     const sector = Math.PI / n;
-    for (let gy = -0.04 * H; gy < H * 1.04; gy += cell) {
-      for (let gx = -0.04 * W; gx < W * 1.04; gx += cell) {
+    for (let gy = -0.05 * H; gy < H * 1.05; gy += cell) {
+      for (let gx = -0.05 * W; gx < W * 1.05; gx += cell) {
         const x = gx + (r() - 0.5) * cell * 0.9, y = gy + (r() - 0.5) * cell * 0.9;
         const rr = this.holeRatio(x, y);
-        if (rr < 1.02) continue;
-        // Sky channels between neighbouring crowns, like the gaps in the reference.
+        if (rr < 1.0) continue;
         const phi = Math.atan2(y - this.cy, x - this.cx);
         let ad = Infinity;
         for (const t of this.trees) ad = Math.min(ad, Math.abs(Math.atan2(Math.sin(phi - t.theta), Math.cos(phi - t.theta))));
-        const frac = ad / sector;
-        if (frac > 0.74 && r() < 0.88) continue;
-        if (r() < 0.07) continue;
+        // Sky channels between neighbouring crowns, and the odd gap inside a crown.
+        if (ad / sector > 0.78 && r() < 0.85) continue;
+        if (r() < 0.06) continue;
         let best = null, bd = Infinity;
         for (const nd of allNodes) {
           const d = (nd.x - x) ** 2 + (nd.y - y) ** 2;
           if (d < bd) { bd = d; best = nd; }
         }
         const grow = clamp((rr - 1) / 1.6, 0, 1);
-        addCluster(x, y, m * (0.075 + 0.04 * r()) * (0.8 + 0.5 * grow), best, false);
+        this.clusters.push(this.makeCluster(r, x, y, m * (0.078 + 0.04 * r()) * (0.85 + 0.45 * grow), best, rr, depthFactor(x, y)));
       }
     }
-    // Far clusters (near the sky hole) first, near ones (frame edges) last.
-    const dist = (c) => Math.hypot(c.x - this.cx, c.y - this.cy) / this.holeR(Math.atan2(c.y - this.cy, c.x - this.cx));
-    // Draw in groups (per tree, per distance tier): a group shares one cream outline, so clusters
-    // merge into big leaf masses and the cream lines only appear between layers.
-    // Outer (frame-edge) layers first and darker; the layer bordering the sky last and lightest.
-    for (const c of this.clusters) { const q = dist(c); c.tier = q < 1.35 ? 0 : q < 1.9 ? 1 : 2; }
-    this.groups = [[], [], []];
-    for (let tier = 2; tier >= 0; tier--) {
-      for (const tr of this.trees) {
-        const g = this.clusters.filter((c) => !c.top && c.tree === tr && c.tier === tier).sort((a, b) => dist(b) - dist(a));
-        if (g.length) this.groups[tier].push(g);
-      }
-    }
-    this.front = this.trees.map((tr) => this.clusters.filter((c) => c.top && c.tree === tr)).filter((g) => g.length);
 
-    // Clouds, bokeh and pollen are layout-dependent too.
+    // Two layers per tree: the outer (lower, nearer the frame) crown first, then the inner crown
+    // bordering the sky on top. Each layer shares one pale rim, so lobes merge into masses.
+    const outer = [], inner = [];
+    for (const tr of this.trees) {
+      const mine = this.clusters.filter((c) => c.tree === tr).sort((a, b) => b.rr - a.rr);
+      const o = mine.filter((c) => c.rr >= 1.55), i = mine.filter((c) => c.rr < 1.55);
+      for (const c of o) c.layer = 1;
+      if (o.length) outer.push(o);
+      if (i.length) inner.push(i);
+    }
+    this.groups = [...outer, ...inner];
+
     this.clouds = Array.from({ length: 12 }, (_, i) => this.makeCloud(r, i));
-    this.bokeh = Array.from({ length: 12 }, () => ({ a: r() * TAU, d: r() * 0.35 * m, rad: (0.012 + 0.035 * r()) * m, ph: r() * TAU }));
-    this.pollen = Array.from({ length: 40 }, () => ({ x: r() * W, y: r() * H, ph: r() * TAU, sz: 0.8 + r() * 1.6 }));
-    this.rays = Array.from({ length: 8 }, () => ({ a: r(), w: 0.025 + 0.05 * r(), ph: r() * TAU }));
   }
 
   grow(tree, r, p0, ang, len, w, depth, s0, depthFactor) {
-    // Keep limbs out of the open sky; only fine twigs may poke a little way in.
-    const limit = depth >= 3 ? 0.88 : 1.02;
+    // Branches end inside the foliage, not out in the open sky.
+    const limit = depth >= 3 ? 1.0 : 1.08;
     let p2 = { x: p0.x + Math.cos(ang) * len, y: p0.y + Math.sin(ang) * len };
     for (let i = 0; i < 6 && this.holeRatio(p2.x, p2.y) < limit; i++) {
       len *= 0.75;
       p2 = { x: p0.x + Math.cos(ang) * len, y: p0.y + Math.sin(ang) * len };
     }
-    if (len < this.m * 0.02) return;
-    const bend = (r() - 0.5) * 0.5;
+    if (len < this.m * 0.03) return;
+    const bend = (r() - 0.5) * 0.45;
     const p1 = { x: (p0.x + p2.x) / 2 - Math.sin(ang) * bend * len * 0.3, y: (p0.y + p2.y) / 2 + Math.cos(ang) * bend * len * 0.3 };
     const s1 = s0 + len / tree.len;
-    const pts = quad(p0, p1, p2, depth < 3 ? 6 : 3).map((p, k, arr) => {
+    const pts = quad(p0, p1, p2, depth < 3 ? 7 : 4).map((p, k, arr) => {
       const s = lerp(s0, s1, k / (arr.length - 1));
       return { ...p, s, df: depthFactor(p.x, p.y) };
     });
-    tree.branches.push({ pts, w0: w, w1: w * 0.55, depth });
+    tree.branches.push({ pts, w0: w, w1: w * 0.3, depth });
     tree.nodes.push({ x: p2.x, y: p2.y, s: s1, depth, tree });
-    if (depth >= 4) return;
-    const kids = depth < 3 ? 2 + (r() < 0.5 ? 1 : 0) : 2;
+    if (depth >= 3) return;
+    const kids = depth === 1 ? 2 : r() < 0.35 ? 2 : 1;
     for (let j = 0; j < kids; j++) {
-      const t = j === 0 ? 1 : 0.5 + 0.45 * r();
+      const t = j === 0 ? 1 : 0.35 + 0.45 * r();
       const k = Math.round(t * (pts.length - 1));
       const side = j % 2 ? 1 : -1;
-      this.grow(tree, r, pts[k], ang + side * (0.25 + r() * 0.5) + (r() - 0.5) * 0.3, len * (0.55 + 0.15 * r()), w * 0.6, depth + 1, pts[k].s, depthFactor);
+      this.grow(tree, r, pts[k], ang + side * (0.3 + r() * 0.4), len * (0.55 + 0.2 * r()), w * 0.5, depth + 1, pts[k].s, depthFactor);
     }
   }
 
-  makeCluster(r, x, y, R, node, top) {
-    const lobes = [{ x: 0, y: 0, r: R * 0.68 }];
-    const k = 10 + Math.floor(r() * 5);
-    const a0 = r() * TAU;
-    for (let j = 0; j < k; j++) {
-      const a = a0 + (j / k) * TAU + (r() - 0.5) * 0.4;
-      const d = R * (0.6 + 0.08 * r());
-      lobes.push({ x: Math.cos(a) * d, y: Math.sin(a) * d, r: R * (0.24 + 0.12 * r()) });
+  makeCluster(r, x, y, R, node, rr, df) {
+    const m = this.m;
+    const nb = clamp(Math.round((TAU * R) / (0.042 * m)), 9, 24);
+    const p1 = r() * TAU, p2 = r() * TAU;
+    const angles = [], radii = [];
+    for (let i = 0; i < nb; i++) {
+      const a = ((i + (r() - 0.5) * 0.35) / nb) * TAU;
+      angles.push(a);
+      radii.push(0.86 + 0.09 * Math.sin(2 * a + p1) + 0.06 * Math.sin(3 * a + p2) + (r() - 0.5) * 0.06);
     }
-    const halo = new Path2D(), body = new Path2D(), shade = new Path2D(), light = new Path2D();
-    const h = R * 0.13;
-    for (const l of lobes) {
-      halo.moveTo(l.x + l.r + h, l.y); halo.arc(l.x, l.y, l.r + h, 0, TAU);
-      body.moveTo(l.x + l.r, l.y); body.arc(l.x, l.y, l.r, 0, TAU);
-      const dot = (l.x * LIGHT.x + l.y * LIGHT.y) / R;
-      if (dot < 0.15) {
-        const sx = l.x - LIGHT.x * l.r * 0.25, sy = l.y - LIGHT.y * l.r * 0.25, sr = l.r * 0.72;
-        shade.moveTo(sx + sr, sy); shade.arc(sx, sy, sr, 0, TAU);
-      }
-      if (dot > 0.05) {
-        const lx = l.x + LIGHT.x * l.r * 0.32, ly = l.y + LIGHT.y * l.r * 0.32, lr = l.r * 0.5;
-        light.moveTo(lx + lr, ly); light.arc(lx, ly, lr, 0, TAU);
-      }
-    }
-    const marks = new Path2D(), flowers = new Path2D();
-    const nm = 10 + Math.floor(r() * 9);
-    for (let j = 0; j < nm; j++) {
-      const a = r() * TAU, d = Math.sqrt(r()) * R * 0.72;
-      const mx = Math.cos(a) * d, my = Math.sin(a) * d;
-      almond(marks, mx, my, R * (0.18 + 0.1 * r()), R * 0.06, r() * TAU);
-      const fr = R * 0.05;
+    const shape = { angles, radii };
+    // The lighter top layer sits toward the sky; the darker base shows as a rim on the far side.
+    const toSky = Math.atan2(this.cy - y, this.cx - x);
+    const ox = Math.cos(toSky) * R * 0.14, oy = Math.sin(toSky) * R * 0.14;
+    const h = m * 0.017;
+    const halo = new Path2D(), base = new Path2D(), top = new Path2D();
+    scallop(halo, 0, 0, R, shape, h);
+    scallop(base, 0, 0, R, shape);
+    scallop(top, ox, oy, R, shape, 0, 0.8);
+
+    const marksTop = new Path2D(), marksBase = new Path2D(), flowersTop = new Path2D(), flowersBase = new Path2D();
+    const leafLen = m * 0.022, leafW = m * 0.0075, fr = m * 0.0055;
+    const count = Math.round(((R * R) / (0.05 * m) ** 2) * 1.1);
+    for (let j = 0; j < count; j++) {
+      const onTop = r() < 0.65;
+      const a = onTop ? r() * TAU : toSky + Math.PI + (r() - 0.5) * 2.2;
+      const d = onTop ? Math.sqrt(r()) * R * 0.6 : R * (0.72 + 0.12 * r());
+      const mx = (onTop ? ox : 0) + Math.cos(a) * d, my = (onTop ? oy : 0) + Math.sin(a) * d;
+      almond(onTop ? marksTop : marksBase, mx, my, leafLen * (0.8 + 0.4 * r()), leafW, r() * TAU);
+      const fp = onTop ? flowersTop : flowersBase;
       for (let q = 0; q < 5; q++) {
         const qa = (q / 5) * TAU + a;
-        const fx = mx + Math.cos(qa) * fr * 1.1, fy = my + Math.sin(qa) * fr * 1.1;
-        flowers.moveTo(fx + fr, fy); flowers.arc(fx, fy, fr, 0, TAU);
+        const fx = mx + Math.cos(qa) * fr * 1.15, fy = my + Math.sin(qa) * fr * 1.15;
+        fp.moveTo(fx + fr, fy); fp.arc(fx, fy, fr, 0, TAU);
       }
     }
     return {
-      x, y, r: R, node, tree: node.tree, top,
+      x, y, r: R, rr, df, node, tree: node.tree, layer: 0,
       sf: Math.pow(clamp(node.s, 0, 1.4), 1.5),
-      rot: (r() - 0.5) * 0.3, phase: r() * TAU,
-      r1: r(), r2: r(), r3: r(), tone: Math.floor(r() * 6),
+      rot: (r() - 0.5) * 0.12, phase: r() * TAU,
+      r1: r(), r2: r(), r3: r(), dark: r() < 0.22,
       ox: 0, oy: 0, vx: 0, vy: 0, en: 0,
-      halo, body, shade, light, marks, flowers,
+      halo, base, top, marksTop, marksBase, flowersTop, flowersBase,
       look: null, from: null, to: null, paint: null,
     };
   }
 
   makeCloud(r, i) {
-    const w = (0.16 + 0.18 * r()) * this.M;
-    const lobes = [];
+    const w = (0.16 + 0.16 * r()) * this.M;
     const k = 5 + Math.floor(r() * 4);
+    const lobes = [];
     for (let j = 0; j < k; j++) {
       const t = j / (k - 1) - 0.5;
-      lobes.push({ x: t * w * 0.85, y: (r() - 0.6) * w * 0.12 - Math.cos(t * Math.PI) * w * 0.08, r: w * (0.12 + 0.1 * r()) * (1 - Math.abs(t) * 0.6) });
+      lobes.push({ x: t * w * 0.85, y: (r() - 0.6) * w * 0.1 - Math.cos(t * Math.PI) * w * 0.08, r: w * (0.12 + 0.09 * r()) * (1 - Math.abs(t) * 0.55) });
     }
-    return { x: r() * this.W, y: r() * this.H, w, lobes, speed: 5 + r() * 10, vis: 0, i };
+    return { x: r() * this.W, y: r() * this.H, w, lobes, speed: 5 + r() * 9, vis: 0, i };
   }
 
   // ---------- scene changes ----------
@@ -281,8 +285,7 @@ export class Canopy {
     const prev = this.scene;
     this.scene = scene;
     if (!prev || instant) {
-      this.envFrom = this.envTo = scene.env;
-      this.env = scene.env;
+      this.envFrom = this.envTo = this.env = scene.env;
       this.mix = 1;
       for (const c of this.clusters) c.look = c.from = c.to = scene.foliage(c, c.tree);
       for (const cl of this.clouds) cl.vis = cl.i < scene.env.cloudN ? 1 : 0;
@@ -299,15 +302,16 @@ export class Canopy {
     for (const c of this.clusters) {
       const a = c.from, b = c.to;
       const L = e >= 1 ? b : {
-        s: lerp(a.s, b.s, e), fill: mixC(a.fill, b.fill, e), shade: mixC(a.shade, b.shade, e),
-        light: mixC(a.light, b.light, e), mark: mixC(a.mark, b.mark, e), halo: mixC(a.halo, b.halo, e),
-        mt: e < 0.5 ? a.mt : b.mt,
+        s: lerp(a.s, b.s, e), light: mixC(a.light, b.light, e), mid: mixC(a.mid, b.mid, e),
+        dark: mixC(a.dark, b.dark, e), halo: mixC(a.halo, b.halo, e), mt: e < 0.5 ? a.mt : b.mt,
       };
       c.look = L;
-      const dk = c.tier === 2 ? 0.45 : c.tier === 1 ? 0.2 : 0;
+      // Inner crown: mid base, light top. Outer crown (and some inner lobes): dark base, mid top.
+      const deep = c.layer === 1 || c.dark;
+      const baseC = deep ? L.dark : L.mid, topC = deep ? L.mid : L.light;
       c.paint = {
-        s: L.s, fill: css(mixC(L.fill, L.shade, dk)), shade: css(mixC(L.shade, L.mark, dk * 0.6)),
-        light: css(mixC(L.light, L.fill, dk)), mark: css(L.mt === 'flower' ? L.mark : mixC(L.mark, [10, 30, 10], 0.18)), halo: css(L.halo), mt: L.mt,
+        s: L.s, halo: css(L.halo), base: css(baseC), top: css(topC),
+        markTop: css(mixC(topC, baseC, 0.75)), markBase: css(mixC(baseC, topC, 0.7)), mt: L.mt,
       };
     }
   }
@@ -332,8 +336,8 @@ export class Canopy {
       this.paintLooks(e);
     }
     const env = this.env;
+    if (!env) return;
 
-    // Pointer velocity relaxes when the cursor stops.
     const decay = Math.exp(-dt * 7);
     P.vx *= decay; P.vy *= decay;
     P.speed = Math.hypot(P.vx, P.vy);
@@ -344,7 +348,7 @@ export class Canopy {
     const gust = this.gust();
     const wa = 0.35 + 0.4 * Math.sin(this.t * 0.05);
     this.wind = { x: Math.cos(wa), y: Math.sin(wa), g: gust };
-    const R2 = (0.22 * this.m) ** 2;
+    const R2 = (0.24 * this.m) ** 2;
 
     for (const tr of this.trees) {
       const d2 = (tr.mid.x - P.x) ** 2 + (tr.mid.y - P.y) ** 2;
@@ -357,23 +361,21 @@ export class Canopy {
     }
 
     let energy = 0;
-    const detachMul = this.scene ? 1 : 0;
     for (const c of this.clusters) {
       const dx = c.x - P.x, dy = c.y - P.y;
       const f = P.active ? Math.exp(-(dx * dx + dy * dy) / R2) : 0;
       const wave = 0.5 + 0.5 * Math.sin(this.t * 1.25 - (c.x * 0.0035 + c.y * 0.0018) + c.phase * 0.4);
-      const fx = P.vx * f * 0.55 + this.wind.x * gust * wave * 150;
-      const fy = P.vy * f * 0.55 + this.wind.y * gust * wave * 150;
+      const fx = P.vx * f * 0.5 + this.wind.x * gust * wave * 130;
+      const fy = P.vy * f * 0.5 + this.wind.y * gust * wave * 130;
       c.vx += (fx - 55 * c.ox - 7.5 * c.vx) * dt; c.ox += c.vx * dt;
       c.vy += (fy - 55 * c.oy - 7.5 * c.vy) * dt; c.oy += c.vy * dt;
-      const lim = c.r * 0.3;
+      const lim = c.r * 0.18;
       c.ox = clamp(c.ox, -lim, lim); c.oy = clamp(c.oy, -lim, lim);
       const ein = f * Math.min(1, P.speed / 1400);
       c.en = Math.max(c.en * Math.exp(-dt * 2.5), ein);
       if (ein > 0.05) energy = Math.max(energy, ein);
-      if (c.en > 0.3 && Math.random() < c.en * dt * 2.2 * detachMul) this.shake(c);
+      if (c.en > 0.3 && Math.random() < c.en * dt * 2.4) this.shake(c);
     }
-    // What the ears hear: cursor wind plus the ambient gust.
     this.windEnergy = clamp(energy * 1.4 + gust * 0.14, 0, 1);
 
     this.spawnAmbient(dt, env);
@@ -381,9 +383,9 @@ export class Canopy {
     this.updateBirds(dt);
     this.updateClouds(dt, env);
     this.updateDroplets(dt, env);
-    if (env.lightning > 0.5 && Math.random() < dt / 16) this.strike();
-    this.flash = Math.max(0, this.flash - dt * 2.2);
-    if (this.flash2 && this.t > this.flash2) { this.flash = 0.8; this.flash2 = 0; }
+    if (env.lightning > 0.5 && Math.random() < dt / 12) this.strike();
+    this.flash = Math.max(0, this.flash - dt * 2.4);
+    if (this.flash2 && this.t > this.flash2) { this.flash = 0.75; this.flash2 = 0; }
 
     this.draw();
   }
@@ -397,33 +399,33 @@ export class Canopy {
   pos(c) {
     const tr = c.tree;
     return {
-      x: c.x + tr.sx * c.sf + c.ox - this.par.x * c.df * 14,
-      y: c.y + tr.sy * c.sf + c.oy - this.par.y * c.df * 14,
+      x: c.x + tr.sx * c.sf + c.ox - this.par.x * c.df * 12,
+      y: c.y + tr.sy * c.sf + c.oy - this.par.y * c.df * 12,
     };
   }
 
-  // A shaken cluster drops something appropriate to the season.
+  // A shaken leaf mass drops something that fits the season and the weather.
   shake(c) {
     const p = c.paint;
     const { x, y } = this.pos(c);
     if (p.s < 0.1) {
-      if (this.env.snow > 0.5) for (let i = 0; i < 3; i++) this.addFall('snow', x, y, [255, 255, 255], 0.6);
+      if (this.env.snow > 0.5) for (let i = 0; i < 3; i++) this.addFall('snow', x + (Math.random() - 0.5) * c.r, y, [255, 255, 255], 0.7);
       return;
     }
-    if (this.env.rates.rain > 60) {
+    if (this.env.rates.rain > 30) {
       for (let i = 0; i < 2; i++) this.addFall('drip', x + (Math.random() - 0.5) * c.r, y, [210, 232, 240], 1);
       return;
     }
-    if (p.mt === 'flower') this.addFall(c.to.mark[0] === 255 ? 'snow' : 'petal', x, y, c.look.light, 1);
-    else this.addFall('leaf', x, y, Math.random() < 0.5 ? c.look.fill : c.look.light, 1);
+    if (p.mt === 'flower') this.addFall('petal', x, y, c.look.light);
+    else this.addFall('leaf', x, y, Math.random() < 0.5 ? c.look.mid : c.look.light);
   }
 
   addFall(type, x, y, color, scale = 1) {
     if (this.particles.length > 700) return;
     const m = this.m;
-    const sz = { leaf: 0.022, petal: 0.012, snow: 0.004, drip: 0.004 }[type] * m * (0.7 + Math.random() * 0.6) * scale;
+    const sz = { leaf: 0.022, petal: 0.013, snow: 0.004, drip: 0.004 }[type] * m * (0.7 + Math.random() * 0.6) * scale;
     this.particles.push({
-      type, rx: x - this.cx, ry: y - this.cy, dx: 0, dy: 0, k: 0,
+      type, rx: x - this.cx, ry: y - this.cy, dx: 0, dy: 0, k: 0, x, y,
       kv: { leaf: 0.22, petal: 0.25, snow: 0.16, drip: 0.9 }[type] * (0.7 + Math.random() * 0.6),
       sz, rot: Math.random() * TAU, vr: (Math.random() - 0.5) * 3, fs: 2 + Math.random() * 4, ph: Math.random() * TAU,
       color: css(color), age: 0,
@@ -432,25 +434,25 @@ export class Canopy {
 
   spawnAmbient(dt, env) {
     const acc = this.spawnAcc;
-    const visible = () => {
+    const pick = (flower) => {
       if (!this.clusters.length) return null;
-      for (let i = 0; i < 8; i++) {
+      for (let i = 0; i < 10; i++) {
         const c = this.clusters[(Math.random() * this.clusters.length) | 0];
-        if (c.paint.s > 0.3) return c;
+        if (c.paint.s > 0.3 && (c.paint.mt === 'flower') === flower) return c;
       }
       return null;
     };
     acc.leaf += env.rates.leaf * dt;
     while (acc.leaf >= 1) {
       acc.leaf--;
-      const c = visible();
-      if (c && c.paint.mt !== 'flower') { const { x, y } = this.pos(c); this.addFall('leaf', x, y, Math.random() < 0.5 ? c.look.fill : c.look.light); }
+      const c = pick(false);
+      if (c) { const { x, y } = this.pos(c); this.addFall('leaf', x, y, Math.random() < 0.5 ? c.look.mid : c.look.light); }
     }
     acc.petal += env.rates.petal * dt;
     while (acc.petal >= 1) {
       acc.petal--;
-      const c = visible();
-      if (c && c.paint.mt === 'flower') { const { x, y } = this.pos(c); this.addFall('petal', x, y, c.look.light); }
+      const c = pick(true);
+      if (c) { const { x, y } = this.pos(c); this.addFall('petal', x, y, c.look.light); }
     }
     acc.snow += env.rates.snow * dt;
     while (acc.snow >= 1) {
@@ -496,12 +498,10 @@ export class Canopy {
     this.birdTimer -= dt;
     const kind = this.scene && this.scene.birds;
     if (this.birdTimer <= 0) {
-      this.birdTimer = kind === 'geese' ? 22 + Math.random() * 15 : kind === 'crow' ? 25 + Math.random() * 20 : 9 + Math.random() * 9;
+      this.birdTimer = kind === 'geese' ? 22 + Math.random() * 15 : kind === 'crow' ? 25 + Math.random() * 20 : 10 + Math.random() * 10;
       if (kind) this.spawnFlock(kind);
     }
-    for (const b of this.birds) {
-      b.x += b.vx * dt; b.y += b.vy * dt; b.ph += dt * b.flap;
-    }
+    for (const b of this.birds) { b.x += b.vx * dt; b.y += b.vy * dt; b.ph += dt * b.flap; }
     const pad = 200;
     this.birds = this.birds.filter((b) => b.x > -pad && b.y > -pad && b.x < this.W + pad && b.y < this.H + pad);
   }
@@ -510,25 +510,24 @@ export class Canopy {
     const m = this.m, M = this.M;
     const a = Math.random() * TAU;
     const start = { x: this.cx - Math.cos(a) * M * 0.62, y: this.cy - Math.sin(a) * M * 0.62 };
-    const heading = a + (Math.random() - 0.5) * 0.5;
-    const speed = M * (kind === 'crow' ? 0.045 : 0.06);
+    const heading = a + (Math.random() - 0.5) * 0.4;
+    const speed = M * (kind === 'crow' ? 0.045 : 0.055);
     const vx = Math.cos(heading) * speed, vy = Math.sin(heading) * speed;
-    const add = (ox, oy, size, flap) =>
-      this.birds.push({ x: start.x + ox, y: start.y + oy, vx, vy, heading, size, flap, ph: Math.random() * TAU });
+    const add = (ox, oy, size, flap) => this.birds.push({ x: start.x + ox, y: start.y + oy, vx, vy, heading, size, flap, ph: Math.random() * TAU });
     if (kind === 'geese') {
-      const n = 5 + Math.floor(Math.random() * 4), sp = m * 0.028;
-      add(0, 0, m * 0.011, 5);
+      const n = 5 + Math.floor(Math.random() * 4), sp = m * 0.03;
+      add(0, 0, m * 0.012, 5);
       for (let i = 1; i <= n; i++) {
         const side = i % 2 ? 1 : -1, row = Math.ceil(i / 2);
-        const bx = -Math.cos(heading) * row * sp + side * -Math.sin(heading) * row * sp * 0.75;
-        const by = -Math.sin(heading) * row * sp + side * Math.cos(heading) * row * sp * 0.75;
-        add(bx, by, m * 0.011, 5 + Math.random());
+        add(-Math.cos(heading) * row * sp - side * Math.sin(heading) * row * sp * 0.75,
+          -Math.sin(heading) * row * sp + side * Math.cos(heading) * row * sp * 0.75, m * 0.012, 5 + Math.random());
       }
     } else if (kind === 'crow') {
-      add(0, 0, m * 0.02, 3.2);
+      add(0, 0, m * 0.022, 3.2);
     } else {
-      const n = 1 + Math.floor(Math.random() * 3);
-      for (let i = 0; i < n; i++) add((Math.random() - 0.5) * m * 0.12, (Math.random() - 0.5) * m * 0.12, m * (0.013 + Math.random() * 0.005), 7 + Math.random() * 3);
+      // Like the reference: a loose little trio.
+      const n = 2 + Math.floor(Math.random() * 2);
+      for (let i = 0; i < n; i++) add((Math.random() - 0.5) * m * 0.1, (Math.random() - 0.5) * m * 0.14, m * (0.016 + Math.random() * 0.005), 6 + Math.random() * 3);
     }
   }
 
@@ -543,8 +542,8 @@ export class Canopy {
   }
 
   updateDroplets(dt, env) {
-    if (env.droplets > 0.5 && this.droplets.length < 24 && Math.random() < dt * 1.6) {
-      this.droplets.push({ x: Math.random() * this.W, y: Math.random() * this.H, r: 3 + Math.random() * 11, age: 0, life: 3 + Math.random() * 5 });
+    if (env.droplets > 0.5 && this.droplets.length < 22 && Math.random() < dt * 1.5) {
+      this.droplets.push({ x: Math.random() * this.W, y: Math.random() * this.H, r: 3 + Math.random() * 10, age: 0, life: 3 + Math.random() * 5 });
     }
     for (const d of this.droplets) { d.age += dt; d.y += dt * (d.r > 10 ? 6 : 0); }
     this.droplets = this.droplets.filter((d) => d.age < d.life);
@@ -553,54 +552,26 @@ export class Canopy {
   // ---------- drawing ----------
 
   draw() {
-    const { ctx, dpr, W, H, env, m, M } = this;
-    if (!env) return;
+    const { ctx, dpr, W, H, env } = this;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.globalCompositeOperation = 'source-over';
     ctx.globalAlpha = 1;
 
-    const sx = env.sunX * W, sy = env.sunY * H;
-
-    // Sky: brightest around the sun.
-    const sky = ctx.createRadialGradient(sx, sy, 0, sx, sy, M * 1.15);
-    sky.addColorStop(0, css(mixC(env.sky, env.glow, 0.85 * env.sunI)));
-    sky.addColorStop(0.35, css(mixC(env.sky, env.glow, 0.25 * env.sunI)));
-    sky.addColorStop(0.7, css(env.sky));
-    sky.addColorStop(1, css(env.skyEdge));
-    ctx.fillStyle = sky;
+    ctx.fillStyle = css(env.sky);
     ctx.fillRect(0, 0, W, H);
-    if (this.flash > 0) { ctx.fillStyle = `rgba(235,240,255,${this.flash * 0.5})`; ctx.fillRect(0, 0, W, H); }
-
-    // Sun disk sits behind the leaves.
-    const sr = 0.04 * m * env.sunSize;
-    const sun = ctx.createRadialGradient(sx, sy, 0, sx, sy, sr * 2.2);
-    sun.addColorStop(0, `rgba(255,253,240,${env.sunI})`);
-    sun.addColorStop(0.45, `rgba(255,250,225,${env.sunI})`);
-    sun.addColorStop(1, 'rgba(255,248,220,0)');
-    ctx.fillStyle = sun;
-    ctx.beginPath(); ctx.arc(sx, sy, sr * 2.2, 0, TAU); ctx.fill();
+    if (this.flash > 0) { ctx.fillStyle = `rgba(235,240,255,${(this.flash * 0.55).toFixed(3)})`; ctx.fillRect(0, 0, W, H); }
 
     this.drawClouds(env);
     this.drawBirds();
-
-    for (const tr of this.trees) this.drawTree(tr, env, true);
-    for (const g of this.groups[2]) this.drawGroup(g);
-    for (const g of this.groups[1]) this.drawGroup(g);
-    for (const tr of this.trees) this.drawTree(tr, env, false);
-    for (const g of this.groups[0]) this.drawGroup(g);
-    for (const g of this.front) this.drawGroup(g);
-
-    this.drawParticles();
-    this.drawLight(env, sx, sy);
+    for (const g of this.groups) this.drawGroup(g);
+    for (const tr of this.trees) this.drawTree(tr, env);
 
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    if (env.fog > 0.005) { ctx.fillStyle = `rgba(250,252,252,${env.fog})`; ctx.fillRect(0, 0, W, H); }
-    const vig = ctx.createRadialGradient(this.cx, this.cy, M * 0.25, this.cx, this.cy, M * 0.85);
-    vig.addColorStop(0, 'rgba(20,40,25,0)');
-    vig.addColorStop(1, 'rgba(20,40,25,0.2)');
-    ctx.fillStyle = vig;
-    ctx.fillRect(0, 0, W, H);
-    if (this.flash > 0) { ctx.fillStyle = `rgba(240,245,255,${this.flash * 0.3})`; ctx.fillRect(0, 0, W, H); }
+    if (env.tintA > 0.005) { ctx.fillStyle = css(env.tint, env.tintA); ctx.fillRect(0, 0, W, H); }
+    this.drawParticles();
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (env.fog > 0.005) { ctx.fillStyle = `rgba(245,248,248,${env.fog.toFixed(3)})`; ctx.fillRect(0, 0, W, H); }
+    if (this.flash > 0) { ctx.fillStyle = `rgba(240,245,255,${(this.flash * 0.3).toFixed(3)})`; ctx.fillRect(0, 0, W, H); }
     this.drawDroplets();
   }
 
@@ -612,21 +583,19 @@ export class Canopy {
       const s = env.cloudScale;
       const x = c.x - this.par.x * 4, y = c.y - this.par.y * 4;
       ctx.globalAlpha = c.vis;
-      ctx.fillStyle = shade;
-      ctx.beginPath();
-      for (const l of c.lobes) { ctx.moveTo(x + l.x * s + l.r * s, y + l.y * s + c.w * 0.04 * s); ctx.arc(x + l.x * s, y + l.y * s + c.w * 0.04 * s, l.r * s, 0, TAU); }
-      ctx.fill();
-      ctx.fillStyle = fill;
-      ctx.beginPath();
-      for (const l of c.lobes) { ctx.moveTo(x + l.x * s + l.r * s, y + l.y * s); ctx.arc(x + l.x * s, y + l.y * s, l.r * s, 0, TAU); }
-      ctx.fill();
+      for (const [col, dy] of [[shade, c.w * 0.04 * s], [fill, 0]]) {
+        ctx.fillStyle = col;
+        ctx.beginPath();
+        for (const l of c.lobes) { ctx.moveTo(x + l.x * s + l.r * s, y + l.y * s + dy); ctx.arc(x + l.x * s, y + l.y * s + dy, l.r * s, 0, TAU); }
+        ctx.fill();
+      }
     }
     ctx.globalAlpha = 1;
   }
 
   drawBirds() {
     const { ctx, dpr } = this;
-    ctx.fillStyle = '#1b2a22';
+    ctx.fillStyle = '#16231b';
     for (const b of this.birds) {
       const s = b.size;
       const span = 0.55 + 0.45 * Math.abs(Math.cos(b.ph));
@@ -645,6 +614,7 @@ export class Canopy {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
 
+  // One leaf mass: shared pale rim, then darker base lobes, lighter top lobes, then leaf marks.
   drawGroup(g) {
     const { ctx, dpr, t } = this;
     const mats = [];
@@ -652,31 +622,31 @@ export class Canopy {
       const p = c.paint;
       if (!p || p.s < 0.02) { mats.push(null); continue; }
       const { x, y } = this.pos(c);
-      const a = c.rot + (c.ox / c.r) * 0.25 + c.en * 0.1 * Math.sin(t * 24 + c.phase);
-      const s = p.s * (1 + c.en * 0.04 * Math.sin(t * 31 + c.phase * 2)) * dpr;
+      const a = c.rot + (c.ox / c.r) * 0.2 + c.en * 0.08 * Math.sin(t * 24 + c.phase);
+      const s = p.s * (1 + c.en * 0.03 * Math.sin(t * 31 + c.phase * 2)) * dpr;
       mats.push([Math.cos(a) * s, Math.sin(a) * s, x * dpr, y * dpr]);
     }
-    for (let i = 0; i < g.length; i++) {
-      const M = mats[i];
-      if (!M) continue;
-      ctx.setTransform(M[0], M[1], -M[1], M[0], M[2], M[3]);
-      ctx.fillStyle = g[i].paint.halo; ctx.fill(g[i].halo);
-    }
-    for (let i = 0; i < g.length; i++) {
-      const M = mats[i];
-      if (!M) continue;
-      const c = g[i], p = c.paint;
-      ctx.setTransform(M[0], M[1], -M[1], M[0], M[2], M[3]);
-      ctx.fillStyle = p.fill; ctx.fill(c.body);
-      ctx.fillStyle = p.shade; ctx.fill(c.shade);
-      ctx.fillStyle = p.light; ctx.fill(c.light);
-      ctx.fillStyle = p.mark; ctx.fill(p.mt === 'flower' ? c.flowers : c.marks);
-    }
+    const pass = (fn) => {
+      for (let i = 0; i < g.length; i++) {
+        const M = mats[i];
+        if (!M) continue;
+        ctx.setTransform(M[0], M[1], -M[1], M[0], M[2], M[3]);
+        fn(g[i], g[i].paint);
+      }
+    };
+    pass((c, p) => { ctx.fillStyle = p.halo; ctx.fill(c.halo); });
+    pass((c, p) => { ctx.fillStyle = p.base; ctx.fill(c.base); });
+    pass((c, p) => { ctx.fillStyle = p.top; ctx.fill(c.top); });
+    pass((c, p) => {
+      const fl = p.mt === 'flower';
+      ctx.fillStyle = p.markTop; ctx.fill(fl ? c.flowersTop : c.marksTop);
+      ctx.fillStyle = p.markBase; ctx.fill(fl ? c.flowersBase : c.marksBase);
+    });
   }
 
   displaced(pts, tr) {
     const out = new Array(pts.length);
-    const px = this.par.x * 14, py = this.par.y * 14;
+    const px = this.par.x * 12, py = this.par.y * 12;
     for (let i = 0; i < pts.length; i++) {
       const p = pts[i];
       const f = Math.pow(clamp(p.s, 0, 1.4), 1.5);
@@ -685,69 +655,51 @@ export class Canopy {
     return out;
   }
 
-  ribbon(pts, w0, w1, stripe = 0) {
-    // Tapered polygon along a polyline. stripe > 0 draws only the lit edge band.
+  // Tapered polygon along a polyline; band > 0 draws only a strip along the upper edge.
+  ribbon(pts, w0, w1, band = 0, tip = 0.55) {
     const { ctx } = this;
     const n = pts.length;
-    const L = [], Rr = [];
+    const L = [], R = [];
     for (let i = 0; i < n; i++) {
       const a = pts[Math.max(0, i - 1)], b = pts[Math.min(n - 1, i + 1)];
       let nx = -(b.y - a.y), ny = b.x - a.x;
       const l = Math.hypot(nx, ny) || 1; nx /= l; ny /= l;
-      if (nx * LIGHT.x + ny * LIGHT.y < 0) { nx = -nx; ny = -ny; }
-      const w = (lerp(w0, w1, i / (n - 1)) / 2) * (i === n - 1 ? 0.4 : 1);
+      if (ny > 0) { nx = -nx; ny = -ny; }
+      const w = (lerp(w0, w1, i / (n - 1)) / 2) * (i === n - 1 ? tip : 1);
       const p = pts[i];
-      if (stripe) {
-        L.push({ x: p.x + nx * w, y: p.y + ny * w });
-        Rr.push({ x: p.x + nx * w * (1 - stripe * 2), y: p.y + ny * w * (1 - stripe * 2) });
-      } else {
-        L.push({ x: p.x + nx * w, y: p.y + ny * w });
-        Rr.push({ x: p.x - nx * w, y: p.y - ny * w });
-      }
+      L.push({ x: p.x + nx * w, y: p.y + ny * w });
+      R.push(band ? { x: p.x + nx * w * (1 - band * 2), y: p.y + ny * w * (1 - band * 2) } : { x: p.x - nx * w, y: p.y - ny * w });
     }
     ctx.beginPath();
     ctx.moveTo(L[0].x, L[0].y);
     for (let i = 1; i < n; i++) ctx.lineTo(L[i].x, L[i].y);
-    for (let i = n - 1; i >= 0; i--) ctx.lineTo(Rr[i].x, Rr[i].y);
+    for (let i = n - 1; i >= 0; i--) ctx.lineTo(R[i].x, R[i].y);
     ctx.closePath();
     ctx.fill();
   }
 
-  drawTree(tr, env, twigs) {
+  drawTree(tr, env) {
     const { ctx, dpr } = this;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const snow = env.snow;
-    const branch = css(env.branch), twig = css(env.twig);
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    for (const b of tr.branches) {
-      if (twigs !== b.depth >= 3) continue;
-      const pts = this.displaced(b.pts, tr);
-      if (b.depth >= 3) {
-        ctx.strokeStyle = twig;
-        ctx.lineWidth = Math.max(0.9, b.w0 * 0.8);
-        ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y);
-        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
-        ctx.stroke();
-        if (snow > 0.02) {
-          ctx.strokeStyle = `rgba(255,255,255,${snow * 0.9})`;
-          ctx.lineWidth = Math.max(0.8, b.w0 * 0.45);
-          ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y - b.w0 * 0.4);
-          for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y - b.w0 * 0.4);
-          ctx.stroke();
-        }
-      } else {
-        ctx.fillStyle = branch;
-        this.ribbon(pts, b.w0, b.w1);
-        if (snow > 0.02) { ctx.fillStyle = `rgba(255,255,255,${snow * 0.92})`; this.ribbon(pts, b.w0, b.w1, 0.22); }
+    const limb = css(env.trunk), branch = css(env.branch);
+    const snowC = `rgba(255,255,255,${(snow * 0.95).toFixed(3)})`;
+    // Fine brown branches first, then the dark main limbs over them, then the trunk.
+    for (const depth of [3, 2, 1]) {
+      for (const b of tr.branches) {
+        if (b.depth !== depth) continue;
+        const pts = this.displaced(b.pts, tr);
+        const w0 = Math.max(1.4, b.w0), w1 = Math.max(0.7, b.w1);
+        ctx.fillStyle = depth === 1 ? limb : branch;
+        this.ribbon(pts, w0, w1, 0, 0.12);
+        if (snow > 0.02) { ctx.fillStyle = snowC; this.ribbon(pts, w0, w1, 0.3, 0.12); }
       }
     }
-    if (twigs) return;
     const trunk = this.displaced(tr.trunk, tr);
-    ctx.fillStyle = css(env.trunk);
+    ctx.fillStyle = limb;
     this.ribbon(trunk, tr.w0, tr.w1);
-    ctx.fillStyle = snow > 0.5 ? `rgba(255,255,255,${snow * 0.9})` : css(env.trunkEdge);
-    this.ribbon(trunk, tr.w0 * 0.92, tr.w1 * 0.92, 0.18);
+    ctx.fillStyle = snow > 0.5 ? snowC : css(env.trunkEdge);
+    this.ribbon(trunk, tr.w0 * 0.92, tr.w1 * 0.92, 0.2);
   }
 
   drawParticles() {
@@ -758,7 +710,7 @@ export class Canopy {
         const x0 = this.cx + p.rx * (1 + k0 * 1.9), y0 = this.cy + p.ry * (1 + k0 * 1.9);
         const x1 = this.cx + p.rx * (1 + p.k * 1.9), y1 = this.cy + p.ry * (1 + p.k * 1.9);
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-        ctx.strokeStyle = `rgba(232,242,248,${Math.min(1, p.age * 4) * 0.55})`;
+        ctx.strokeStyle = `rgba(232,242,248,${(Math.min(1, p.age * 4) * 0.55).toFixed(3)})`;
         ctx.lineWidth = p.w * (0.8 + p.k * 1.1);
         ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
         continue;
@@ -782,100 +734,17 @@ export class Canopy {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
 
-  drawLight(env, sx, sy) {
-    const { ctx, m, M, t } = this;
-    const I = env.sunI;
-    if (I < 0.05) return;
-    ctx.globalCompositeOperation = 'screen';
-
-    // Bloom: leaves near the sun glow.
-    const bloom = ctx.createRadialGradient(sx, sy, 0, sx, sy, m * 0.55);
-    bloom.addColorStop(0, `rgba(255,246,215,${0.75 * I})`);
-    bloom.addColorStop(0.3, `rgba(255,240,200,${0.25 * I})`);
-    bloom.addColorStop(1, 'rgba(255,240,200,0)');
-    ctx.fillStyle = bloom;
-    ctx.fillRect(0, 0, this.W, this.H);
-
-    // Slow god rays fanning out from the sun.
-    if (env.rays > 0.02) {
-      const base = Math.atan2(this.cy - sy, this.cx - sx);
-      for (const r of this.rays) {
-        const a = base + (r.a - 0.5) * 2.2 + Math.sin(t * 0.07 + r.ph) * 0.06;
-        const w = r.w * (0.8 + 0.2 * Math.sin(t * 0.3 + r.ph));
-        const g = ctx.createRadialGradient(sx, sy, 0, sx, sy, M * 1.2);
-        const al = 0.09 * I * env.rays * (0.6 + 0.4 * Math.sin(t * 0.21 + r.ph * 3));
-        g.addColorStop(0, `rgba(255,248,220,${al})`);
-        g.addColorStop(1, 'rgba(255,248,220,0)');
-        ctx.fillStyle = g;
-        ctx.beginPath();
-        ctx.moveTo(sx, sy);
-        ctx.arc(sx, sy, M * 1.2, a - w, a + w);
-        ctx.closePath();
-        ctx.fill();
-      }
-    }
-
-    // Bokeh near the sun.
-    const nb = Math.floor(env.rates.bokeh);
-    for (let i = 0; i < Math.min(nb, this.bokeh.length); i++) {
-      const b = this.bokeh[i];
-      const bx = sx + Math.cos(b.a + t * 0.02) * b.d - this.par.x * 20, by = sy + Math.sin(b.a + t * 0.02) * b.d - this.par.y * 20;
-      const al = (0.07 + 0.05 * Math.sin(t * 0.5 + b.ph)) * I;
-      const g = ctx.createRadialGradient(bx, by, 0, bx, by, b.rad);
-      g.addColorStop(0, `rgba(255,250,230,${al})`);
-      g.addColorStop(0.8, `rgba(255,250,230,${al * 0.8})`);
-      g.addColorStop(1, 'rgba(255,250,230,0)');
-      ctx.fillStyle = g;
-      ctx.beginPath(); ctx.arc(bx, by, b.rad, 0, TAU); ctx.fill();
-    }
-
-    // Lens flare along the sun → centre axis, nudged by the cursor.
-    if (I > 0.4) {
-      const P = this.pointer;
-      const tx = P.active ? lerp(this.cx, P.x, 0.35) : this.cx, ty = P.active ? lerp(this.cy, P.y, 0.35) : this.cy;
-      const flares = [[0.45, 0.018, '255,240,200'], [0.7, 0.04, '200,255,220'], [0.95, 0.014, '255,210,230'], [1.25, 0.065, '220,240,255'], [1.6, 0.025, '255,235,190']];
-      for (const [f, rad, col] of flares) {
-        const fx = lerp(sx, tx, f * 1.6), fy = lerp(sy, ty, f * 1.6);
-        ctx.fillStyle = `rgba(${col},${0.07 * (I - 0.3)})`;
-        ctx.beginPath();
-        for (let k = 0; k < 6; k++) {
-          const a = (k / 6) * TAU + 0.3;
-          const px = fx + Math.cos(a) * rad * m, py = fy + Math.sin(a) * rad * m;
-          k ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
-        }
-        ctx.closePath(); ctx.fill();
-      }
-    }
-
-    // Floating pollen catching the light.
-    const np = Math.floor(env.rates.pollen);
-    for (let i = 0; i < Math.min(np, this.pollen.length); i++) {
-      const p = this.pollen[i];
-      p.x += (Math.sin(t * 0.3 + p.ph) * 6 + this.wind.x * 4) * (1 / 60);
-      p.y += (Math.cos(t * 0.23 + p.ph * 2) * 5 - 1) * (1 / 60);
-      if (p.x > this.W + 10) p.x = -10; if (p.y < -10) p.y = this.H + 10;
-      const al = (0.35 + 0.35 * Math.sin(t * 2 + p.ph * 5)) * I;
-      ctx.fillStyle = `rgba(255,250,220,${al})`;
-      ctx.beginPath(); ctx.arc(p.x, p.y, p.sz, 0, TAU); ctx.fill();
-    }
-
-    // Warm haze over everything.
-    ctx.fillStyle = css(env.haze, env.hazeA * (0.5 + 0.5 * I));
-    ctx.fillRect(0, 0, this.W, this.H);
-    ctx.globalCompositeOperation = 'source-over';
-  }
-
   drawDroplets() {
     const { ctx } = this;
     for (const d of this.droplets) {
       const a = Math.min(1, d.age * 2) * Math.min(1, (d.life - d.age) / 1.2);
       const g = ctx.createRadialGradient(d.x - d.r * 0.25, d.y - d.r * 0.3, d.r * 0.1, d.x, d.y, d.r);
-      g.addColorStop(0, `rgba(255,255,255,${0.04 * a})`);
-      g.addColorStop(0.75, `rgba(255,255,255,${0.1 * a})`);
-      g.addColorStop(1, `rgba(255,255,255,${0.3 * a})`);
+      g.addColorStop(0, `rgba(255,255,255,${(0.04 * a).toFixed(3)})`);
+      g.addColorStop(0.75, `rgba(255,255,255,${(0.1 * a).toFixed(3)})`);
+      g.addColorStop(1, `rgba(255,255,255,${(0.3 * a).toFixed(3)})`);
       ctx.fillStyle = g;
       ctx.beginPath(); ctx.arc(d.x, d.y, d.r, 0, TAU); ctx.fill();
-      ctx.fillStyle = `rgba(255,255,255,${0.55 * a})`;
+      ctx.fillStyle = `rgba(255,255,255,${(0.55 * a).toFixed(3)})`;
       ctx.beginPath(); ctx.ellipse(d.x - d.r * 0.35, d.y - d.r * 0.4, d.r * 0.22, d.r * 0.12, -0.6, 0, TAU); ctx.fill();
     }
   }

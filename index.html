@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>Canopy</title>
     <meta name="description" content="Lie back and look up. The trees overhead follow the season wherever you are." />
-    <meta name="theme-color" content="#8ccbe8" />
+    <meta name="theme-color" content="#9fd2ea" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500&family=Fraunces:ital,opsz,wght@1,9..144,400&display=swap" rel="stylesheet" />
@@ -19,7 +19,7 @@
         --accent: #2f6a3c;
       }
       * { box-sizing: border-box; }
-      html, body { margin: 0; height: 100%; overflow: hidden; background: #8ccbe8; }
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #9fd2ea; }
       body { font-family: 'DM Sans', system-ui, sans-serif; color: var(--ink); -webkit-font-smoothing: antialiased; }
       canvas { position: fixed; inset: 0; display: block; touch-action: none; cursor: crosshair; }
       button { font: inherit; color: inherit; }
@@ -51,8 +51,13 @@
         transition: opacity .18s ease, transform .18s ease;
       }
       .panel.open { opacity: 1; transform: none; pointer-events: auto; }
-      .panel h2 { margin: 0 0 8px; font-size: 11px; font-weight: 500; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-soft); }
-      .panel h2 + .row { margin-bottom: 16px; }
+      .panel h2 { margin: 0 0 8px; font-family: 'Fraunces', Georgia, serif; font-style: italic; font-weight: 400; font-size: 16px; color: var(--ink); }
+      .panel h2 + .row, .head + .row { margin-bottom: 16px; }
+      .head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+      .head h2 { margin: 0; }
+      .units { display: inline-flex; padding: 2px; border-radius: 999px; background: rgba(29,53,38,.08); }
+      .units button { border: 0; background: transparent; border-radius: 999px; padding: 3px 9px; font-size: 12px; cursor: pointer; color: var(--ink-soft); }
+      .units button[aria-pressed="true"] { background: #fff; color: var(--ink); box-shadow: 0 1px 3px rgba(20,50,30,.15); }
       .row { display: flex; flex-wrap: wrap; gap: 6px; }
       .pill {
         border: 1px solid var(--line); background: rgba(255,255,255,.5); border-radius: 999px;
@@ -96,9 +101,14 @@
     </button>
 
     <div class="panel" id="panel" role="dialog" aria-label="Season and place">
-      <h2>Season</h2>
+      <div class="head">
+        <h2>Daydream another season</h2>
+        <div class="units" id="units" role="group" aria-label="Temperature units">
+          <button data-u="C" aria-pressed="false">°C</button><button data-u="F" aria-pressed="false">°F</button>
+        </div>
+      </div>
       <div class="row" id="seasons"></div>
-      <h2>Right now in</h2>
+      <h2>Wanna peek at someone else’s sky?</h2>
       <div class="row" id="places"></div>
       <p class="note" id="note"></p>
     </div>
