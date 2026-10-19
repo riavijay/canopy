@@ -66,7 +66,39 @@
       .pill:hover { background: #fff; }
       .pill[aria-pressed="true"] { background: var(--ink); color: #f7f6ea; border-color: var(--ink); }
       .pill.home { font-weight: 500; }
-      .note { margin: 4px 0 0; font-size: 12px; line-height: 1.45; color: var(--ink-soft); }
+      .note { margin: 12px 0 0; font-size: 12px; line-height: 1.45; color: var(--ink-soft); }
+      .gap { margin-top: 18px !important; }
+      .slider { display: block; margin: 4px 0 14px; }
+      .slider-top { display: flex; justify-content: space-between; align-items: baseline; font-size: 13px; font-weight: 500; margin-bottom: 6px; }
+      .tag { font-family: 'Fraunces', Georgia, serif; font-style: italic; font-weight: 400; font-size: 15px; color: var(--ink); }
+      .ticks { display: flex; justify-content: space-between; font-size: 10px; color: var(--ink-soft); margin-top: 4px; padding: 0 3px; }
+      input[type="range"] {
+        -webkit-appearance: none; appearance: none; width: 100%; height: 10px; border-radius: 999px; margin: 0;
+        background: rgba(29,53,38,.12); outline: none; cursor: pointer;
+      }
+      input[type="range"]::-webkit-slider-thumb {
+        -webkit-appearance: none; width: 22px; height: 22px; border-radius: 50%; background: #fff;
+        border: 0; box-shadow: 0 1px 4px rgba(10,30,20,.35), 0 0 0 3px rgba(255,255,255,.5);
+      }
+      input[type="range"]::-moz-range-thumb { width: 22px; height: 22px; border-radius: 50%; background: #fff; border: 0; box-shadow: 0 1px 4px rgba(10,30,20,.35); }
+      input[type="range"]:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 3px var(--accent); }
+      .link { border: 0; background: none; padding: 2px 0; font-size: 13px; color: var(--accent); cursor: pointer; font-weight: 500; }
+      .link:hover { text-decoration: underline; }
+      .search { position: relative; }
+      .search input {
+        width: 100%; font: inherit; font-size: 14px; color: var(--ink); padding: 10px 14px; border-radius: 12px;
+        border: 1px solid var(--line); background: rgba(255,255,255,.7); outline: none;
+      }
+      .search input:focus { border-color: var(--accent); background: #fff; }
+      #results { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 2px; }
+      #results button {
+        width: 100%; text-align: left; border: 0; background: transparent; border-radius: 10px; padding: 7px 10px;
+        font-size: 14px; cursor: pointer; display: flex; justify-content: space-between; gap: 8px;
+      }
+      #results button:hover, #results button:focus-visible { background: rgba(29,53,38,.07); outline: none; }
+      #results small { color: var(--ink-soft); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      #results .empty { font-size: 13px; color: var(--ink-soft); padding: 6px 10px; }
+      .panel { max-height: calc(100vh - 110px); overflow-y: auto; }
 
       .sound {
         position: fixed; right: 16px; bottom: max(16px, env(safe-area-inset-bottom));
@@ -100,16 +132,31 @@
       <span class="caret" aria-hidden="true">▾</span>
     </button>
 
-    <div class="panel" id="panel" role="dialog" aria-label="Season and place">
+    <div class="panel" id="panel" role="dialog" aria-label="Time, season and place">
       <div class="head">
-        <h2>Daydream another season</h2>
+        <h2>Wander through the year</h2>
         <div class="units" id="units" role="group" aria-label="Temperature units">
           <button data-u="C" aria-pressed="false">°C</button><button data-u="F" aria-pressed="false">°F</button>
         </div>
       </div>
-      <div class="row" id="seasons"></div>
-      <h2>Wanna peek at someone else’s sky?</h2>
-      <div class="row" id="places"></div>
+      <label class="slider">
+        <span class="slider-top"><span id="monthLabel">—</span><span class="tag" id="monthSeason"></span></span>
+        <input type="range" id="month" min="0" max="11" step="1" aria-label="Month" />
+        <span class="ticks" aria-hidden="true"><span>J</span><span>F</span><span>M</span><span>A</span><span>M</span><span>J</span><span>J</span><span>A</span><span>S</span><span>O</span><span>N</span><span>D</span></span>
+      </label>
+      <label class="slider">
+        <span class="slider-top"><span>Time of day</span><span class="tag" id="hourLabel"></span></span>
+        <input type="range" id="hour" min="0" max="95" step="1" aria-label="Time of day" />
+        <span class="ticks" aria-hidden="true"><span>12a</span><span>6a</span><span>noon</span><span>6p</span><span>12a</span></span>
+      </label>
+      <button class="link" id="now" hidden>↺ Back to right now</button>
+
+      <h2 class="gap">Wanna peek at someone else’s sky?</h2>
+      <div class="search">
+        <input id="q" type="search" placeholder="Try Kyoto, Lisbon, Pune…" autocomplete="off" spellcheck="false" aria-label="Search for a city" />
+        <ul id="results" role="listbox"></ul>
+      </div>
+      <button class="link" id="mysky" hidden>☀︎ Back to my sky</button>
       <p class="note" id="note"></p>
     </div>
 

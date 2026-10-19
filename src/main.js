@@ -1,7 +1,10 @@
 import { Canopy } from './scene.js';
 import { buildScene } from './palettes.js';
 import { Ambience } from './audio.js';
-import { PRESETS, resolvePlace, guessFromTimezone, seasonFor, manualSeason, fetchWeather, fakeWeather } from './season.js';
+import {
+  resolvePlace, guessFromTimezone, seasonFor, fetchWeather, fetchHistory, fakeWeather, searchPlaces,
+  localParts, fromLocal, solarElevation, moonPhase, festivalFor,
+} from './season.js';
 
 const $ = (id) => document.getElementById(id);
 const canopy = new Canopy($('c'));
@@ -10,111 +13,208 @@ canopy.onThunder = (d) => audio.thunder(d);
 if (import.meta.env.DEV) window.__canopy = canopy;
 
 // ---------- state ----------
-// home: where the visitor is. view: what's on screen (home, another city, or a hand-picked season).
+// home: where the visitor is. place: the sky on screen. monthOv / hourOv: slider overrides (null = now).
 let home = null;
-let view = null;
-const weatherCache = new Map();
+let place = null;
+let monthOv = null, hourOv = null;
+const liveCache = new Map(); // place key → { w, at }
+const histCache = new Map(); // place key + date → weather that day
 const query = new URLSearchParams(location.search);
 const forcedWeather = fakeWeather(query.get('weather')); // ?weather=storm etc. for previews
 const store = {
   get(k) { try { return localStorage.getItem(k); } catch { return null; } },
   set(k, v) { try { localStorage.setItem(k, v); } catch {} },
 };
-let units = store.get('canopy-units'); // 'C' | 'F', or null until we know where you are
+let units = store.get('canopy-units');
+const browserTz = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone; } catch { return 'UTC'; } })();
+const keyOf = (p) => `${p.lat.toFixed(2)},${p.lon.toFixed(2)}`;
+const pad = (n) => String(n).padStart(2, '0');
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
-function show(next, instant = false) {
-  view = next;
-  const weather = next.mode === 'manual' ? null : next.weather;
-  canopy.setScene(buildScene(next.season, weather), instant);
-  audio.setScene(next.season.key, weather);
+// The moment being shown, as an instant plus the wall-clock parts at the place.
+function moment() {
+  const tz = place.tz || browserTz;
+  const now = localParts(tz);
+  if (monthOv === null && hourOv === null) return { date: new Date(), lp: now, live: true, tz };
+  const y = now.y, mo = monthOv ?? now.mo;
+  const d = Math.min(now.d, new Date(y, mo + 1, 0).getDate());
+  const h = hourOv === null ? now.h : Math.floor(hourOv / 4), mi = hourOv === null ? now.mi : (hourOv % 4) * 15;
+  return { date: fromLocal(tz, y, mo, d, h, mi), lp: { y, mo, d, h, mi }, live: monthOv === null, tz };
+}
+
+// For another month, the most recent past date with that day — the archive lags by about a week.
+function pastDate(lp) {
+  const today = localParts(place.tz || browserTz);
+  let y = lp.y;
+  if (Date.UTC(y, lp.mo, lp.d) > Date.UTC(today.y, today.mo, today.d) - 7 * 86400000) y -= 1;
+  const d = Math.min(lp.d, new Date(y, lp.mo + 1, 0).getDate());
+  return `${y}-${pad(lp.mo + 1)}-${pad(d)}`;
+}
+
+function weatherFor(m) {
+  if (forcedWeather) return forcedWeather;
+  if (m.live) return liveCache.get(keyOf(place))?.w || null;
+  return histCache.get(keyOf(place) + pastDate(m.lp)) || null;
+}
+
+let current = null;
+function render(duration = 2.6, instant = false) {
+  if (!place) return;
+  const m = moment();
+  const season = seasonFor(place, new Date(m.lp.y, m.lp.mo, m.lp.d));
+  const w = weatherFor(m);
+  const tod = { elev: solarElevation(m.date, place.lat, place.lon), moon: moonPhase(m.date), festival: festivalFor(place, m.lp) };
+  const scene = buildScene(season, w, tod);
+  canopy.setScene(scene, instant, duration);
+  audio.setScene(season.key, w, scene.night);
+  current = { m, season, w, tod };
   renderChip();
   renderPanel();
 }
 
-async function placeView(place, mode) {
-  const season = seasonFor(place);
-  const v = { place, season, weather: forcedWeather || weatherCache.get(place.city) || null, mode };
-  if (!v.weather) {
-    fetchWeather(place.lat, place.lon).then((w) => {
-      if (!w) return;
-      weatherCache.set(place.city, w);
-      if (home && home.place === place) home.weather = w;
-      // Only re-apply if we're still looking at this place.
-      if (view && view.place === place && view.mode !== 'manual') show({ ...view, weather: w });
-    });
+// ---------- weather ----------
+async function ensureWeather() {
+  if (!place || forcedWeather) return;
+  const m = moment();
+  const k = keyOf(place), p = place;
+  if (m.live) {
+    const hit = liveCache.get(k);
+    if (hit && Date.now() - hit.at < 10 * 60 * 1000) return;
+    const w = await fetchWeather(p.lat, p.lon);
+    if (!w) return;
+    liveCache.set(k, { w, at: Date.now() });
+    if (!p.tz && w.tz) p.tz = w.tz;
+  } else {
+    const ymd = pastDate(m.lp);
+    if (histCache.has(k + ymd)) return;
+    const w = await fetchHistory(p.lat, p.lon, ymd);
+    if (!w) return;
+    histCache.set(k + ymd, w);
   }
-  return v;
+  if (place === p) render(1.5);
 }
+let weatherT;
+const ensureWeatherSoon = () => { clearTimeout(weatherT); weatherT = setTimeout(ensureWeather, 350); };
 
-// ---------- chip + panel ----------
+// ---------- chip ----------
 const FAHRENHEIT = ['US', 'LR', 'MM', 'BS', 'BZ', 'KY', 'PW'];
-const unit = () => units || (home && FAHRENHEIT.includes(home.place.country) ? 'F' : 'C');
+const unit = () => units || (home && FAHRENHEIT.includes(home.country) ? 'F' : 'C');
 const temp = (w) => `${Math.round(unit() === 'F' ? (w.temp * 9) / 5 + 32 : w.temp)}°${unit()}`;
+const clock = (h, mi) => `${((h + 11) % 12) + 1}:${pad(mi)} ${h < 12 ? 'am' : 'pm'}`;
 
 function renderChip() {
-  const { place, season, weather, mode } = view;
+  const { m, season, w, tod } = current;
   $('city').textContent = place.city ? `${place.city} ·` : '';
   $('season').textContent = season.label;
-  let sub = '';
-  if (mode === 'manual') sub = 'Daydreaming · tap to come back';
-  else if (weather) sub = `${weather.label}, ${temp(weather)}`;
-  else sub = mode === 'home' ? 'your sky right now' : 'checking the sky…';
+  const when = m.live ? clock(m.lp.h, m.lp.mi) : `${MONTHS[m.lp.mo].slice(0, 3)} ${m.lp.d}, ${clock(m.lp.h, m.lp.mi)}`;
+  let sub = when;
+  if (w) sub += w.historical ? ` · ${w.label}, ${temp(w)} that day last year` : ` · ${w.label}, ${temp(w)}`;
+  else if (!m.live) sub += ' · digging up last year’s weather…';
+  if (tod.festival === 'christmas') sub += ' · ✨';
+  if (tod.festival === 'diwali') sub += ' · 🪔';
   $('sub').textContent = sub;
 }
 
-const SEASONS = ['spring', 'summer', 'monsoon', 'autumn', 'winter'];
-
+// ---------- panel ----------
+const SEASON_COLORS = { spring: '#f3a8c4', summer: '#7cc24f', monsoon: '#4f8f8a', autumn: '#e8873a', winter: '#b9cbe0', misty: '#a9b99a' };
 function renderPanel() {
-  const seasons = $('seasons');
-  seasons.textContent = '';
-  if (home) {
-    const b = pill(`☀︎ My sky · ${home.season.label}`, view.mode === 'home', () => show({ ...home, weather: forcedWeather || weatherCache.get(home.place.city) || home.weather, mode: 'home' }));
-    b.classList.add('home');
-    seasons.append(b);
+  const { m, season } = current;
+  const monthEl = $('month'), hourEl = $('hour');
+  if (document.activeElement !== monthEl) monthEl.value = m.lp.mo;
+  if (document.activeElement !== hourEl) hourEl.value = m.lp.h * 4 + Math.floor(m.lp.mi / 15);
+  $('monthLabel').textContent = MONTHS[m.lp.mo];
+  $('monthSeason').textContent = season.label;
+  $('hourLabel').textContent = clock(m.lp.h, m.lp.mi);
+  $('now').hidden = monthOv === null && hourOv === null;
+  $('mysky').hidden = !home || place === home;
+
+  // The month track shows this place's seasons; the time track shows its real sunrise and sunset.
+  const stops = [];
+  for (let i = 0; i < 12; i++) {
+    const c = SEASON_COLORS[seasonFor(place, new Date(m.lp.y, i, 15)).key];
+    stops.push(`${c} ${(i / 12) * 100}%`, `${c} ${((i + 1) / 12) * 100}%`);
   }
-  for (const key of SEASONS) {
-    const s = manualSeason(key, view.place);
-    seasons.append(pill(s.label, view.mode === 'manual' && view.season.key === key, () => {
-      show({ place: view.place, season: s, weather: null, mode: 'manual' });
-    }));
+  monthEl.style.background = `linear-gradient(90deg, ${stops.join(',')})`;
+  const tz = m.tz, hs = [];
+  for (let i = 0; i <= 24; i++) {
+    const e = solarElevation(fromLocal(tz, m.lp.y, m.lp.mo, m.lp.d, i % 24, 0), place.lat, place.lon);
+    const c = e > 8 ? '#8ccbee' : e > -1 ? '#f2a77e' : e > -7 ? '#8d8fc4' : '#1f2b4a';
+    hs.push(`${c} ${(i / 24) * 100}%`);
   }
-  const places = $('places');
-  places.textContent = '';
-  for (const p of PRESETS) {
-    if (home && p.city === home.place.city) continue;
-    places.append(pill(p.city, view.mode === 'city' && view.place.city === p.city, async () => {
-      show(await placeView(p, 'city'));
-    }));
-  }
-  const src = home && home.place.source;
-  $('note').textContent =
-    (src === 'timezone' ? 'We guessed your city from your timezone. ' : 'Your sky follows roughly where you are and today’s date. ') +
-    'Live weather by Open-Meteo.';
+  hourEl.style.background = `linear-gradient(90deg, ${hs.join(',')})`;
+
   for (const b of document.querySelectorAll('#units button')) b.setAttribute('aria-pressed', String(b.dataset.u === unit()));
+  $('note').textContent = (home && home.source === 'timezone' ? 'We guessed your city from your timezone. ' : '') +
+    'Live and past weather plus city search from Open-Meteo; the sun and moon are worked out for the exact spot.';
 }
 
-function pill(label, pressed, onClick) {
-  const b = document.createElement('button');
-  b.className = 'pill';
-  b.textContent = label;
-  b.setAttribute('aria-pressed', String(pressed));
-  b.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
-  return b;
+let slideT = 0;
+function onSlide() {
+  const now = performance.now();
+  if (now - slideT < 120) return;
+  slideT = now;
+  render(0.6);
+  ensureWeatherSoon();
+}
+$('month').addEventListener('input', (e) => {
+  const v = +e.target.value;
+  monthOv = v === localParts(place.tz || browserTz).mo && hourOv === null ? null : v;
+  onSlide();
+});
+$('hour').addEventListener('input', (e) => { hourOv = +e.target.value; onSlide(); });
+for (const id of ['month', 'hour']) $(id).addEventListener('change', () => { slideT = 0; render(0.6); ensureWeatherSoon(); });
+$('now').addEventListener('click', () => { monthOv = hourOv = null; render(1.5); ensureWeather(); });
+$('mysky').addEventListener('click', () => goTo(home));
+
+function goTo(p) {
+  place = p;
+  $('q').value = '';
+  $('results').textContent = '';
+  render(2);
+  ensureWeather();
 }
 
+// ---------- city search ----------
+let searchCtl = null, searchT;
+$('q').addEventListener('input', (e) => {
+  const q = e.target.value.trim();
+  clearTimeout(searchT);
+  if (searchCtl) searchCtl.abort();
+  if (q.length < 2) { $('results').textContent = ''; return; }
+  searchT = setTimeout(async () => {
+    searchCtl = new AbortController();
+    let found = [];
+    try { found = await searchPlaces(q, searchCtl.signal); } catch { return; }
+    const list = $('results');
+    list.textContent = '';
+    if (!found.length) {
+      const li = document.createElement('li'); li.className = 'empty'; li.textContent = 'Hmm, no sky by that name. Try another spelling?';
+      list.append(li); return;
+    }
+    for (const p of found) {
+      const li = document.createElement('li');
+      const b = document.createElement('button');
+      b.setAttribute('role', 'option');
+      b.innerHTML = '<span></span><small></small>';
+      b.firstChild.textContent = p.city;
+      b.lastChild.textContent = [p.region, p.countryName].filter(Boolean).join(', ');
+      b.addEventListener('click', (ev) => { ev.stopPropagation(); goTo(p); });
+      li.append(b); list.append(li);
+    }
+  }, 250);
+});
+$('q').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { const first = $('results').querySelector('button'); if (first) first.click(); }
+  e.stopPropagation();
+});
+
+// ---------- chip + panel toggling ----------
 const chip = $('chip'), panel = $('panel');
 function togglePanel(open = !panel.classList.contains('open')) {
   panel.classList.toggle('open', open);
   chip.setAttribute('aria-expanded', String(open));
 }
-chip.addEventListener('click', (e) => {
-  e.stopPropagation();
-  if (view && view.mode === 'manual' && !panel.classList.contains('open') && home) {
-    show({ ...home, weather: forcedWeather || weatherCache.get(home.place.city) || home.weather, mode: 'home' });
-    return;
-  }
-  togglePanel();
-});
+chip.addEventListener('click', (e) => { e.stopPropagation(); togglePanel(); });
 panel.addEventListener('pointerdown', (e) => e.stopPropagation());
 for (const b of document.querySelectorAll('#units button')) {
   b.addEventListener('click', (e) => {
@@ -183,18 +283,24 @@ function frame(now) {
   audio.setWind(canopy.windEnergy);
   requestAnimationFrame(frame);
 }
+// Keep "now" in step with the real clock: the sky drifts with the sun, weather refreshes.
+setInterval(() => {
+  if (place && monthOv === null && hourOv === null) { render(4); ensureWeather(); }
+}, 60 * 1000);
 
 // ---------- boot ----------
 (async () => {
   // Paint something immediately from the timezone guess, then refine.
-  const guess = guessFromTimezone();
-  show({ place: guess, season: seasonFor(guess), weather: null, mode: 'home' }, true);
+  place = { ...guessFromTimezone(), tz: browserTz };
+  render(0, true);
   requestAnimationFrame(frame);
 
-  const place = await resolvePlace();
-  home = await placeView(place, 'home');
-  const sameSeason = home.season.key === view.season.key && home.season.variant === view.season.variant;
-  const forced = query.get('season');
-  if (SEASONS.includes(forced)) show({ place, season: manualSeason(forced, place), weather: forcedWeather, mode: forcedWeather ? 'city' : 'manual' }, true);
-  else show(home, sameSeason);
+  const found = await resolvePlace();
+  home = { ...found, tz: found.tz || (found.source === 'timezone' || found.source === 'default' ? browserTz : undefined) };
+  place = home;
+  const qm = query.get('month'), qh = query.get('hour');
+  if (qm !== null && qm !== '') monthOv = Math.max(0, Math.min(11, +qm - 1));
+  if (qh !== null && qh !== '') hourOv = Math.max(0, Math.min(95, Math.round(+qh * 4)));
+  render(1.5);
+  ensureWeather();
 })();

@@ -252,10 +252,12 @@ export async function fetchWeather(lat, lon) {
       `&current=temperature_2m,weather_code,cloud_cover,wind_speed_10m,wind_gusts_10m,precipitation,is_day&timezone=auto`;
     const r = await fetch(u, { signal: withTimeout(5000) });
     if (!r.ok) return null;
-    const c = (await r.json()).current;
+    const j = await r.json();
+    const c = j.current;
     const cloud = c.cloud_cover ?? 0;
     const kind = weatherFromCode(c.weather_code, cloud);
     return {
+      tz: j.timezone,
       kind, label: WEATHER_LABELS[kind], code: c.weather_code,
       temp: c.temperature_2m, cloud,
       wind: Math.max(c.wind_speed_10m ?? 8, (c.wind_gusts_10m ?? 0) * 0.6),
@@ -265,4 +267,93 @@ export async function fetchWeather(lat, lon) {
   } catch {
     return null;
   }
+}
+
+// ---------- search, history, sun, moon, local time, festivals ----------
+
+// City search via Open-Meteo's free geocoding API.
+export async function searchPlaces(q, signal) {
+  const u = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(q)}&count=6&language=en&format=json`;
+  const r = await fetch(u, { signal });
+  if (!r.ok) return [];
+  const j = await r.json();
+  return (j.results || []).map((x) => ({
+    city: x.name, country: x.country_code || '', countryName: x.country || '', region: x.admin1 || '',
+    lat: x.latitude, lon: x.longitude, tz: x.timezone, source: 'search',
+  }));
+}
+
+// What the weather actually was at a place on a given local date (Open-Meteo historical archive).
+export async function fetchHistory(lat, lon, ymd) {
+  try {
+    const u = `https://archive-api.open-meteo.com/v1/archive?latitude=${lat.toFixed(2)}&longitude=${lon.toFixed(2)}` +
+      `&start_date=${ymd}&end_date=${ymd}&daily=weather_code,temperature_2m_mean,precipitation_sum,cloud_cover_mean,wind_speed_10m_max&timezone=auto`;
+    const r = await fetch(u, { signal: withTimeout(6000) });
+    if (!r.ok) return null;
+    const d = (await r.json()).daily;
+    if (!d || d.weather_code[0] == null) return null;
+    const cloud = d.cloud_cover_mean[0] ?? 50;
+    const kind = weatherFromCode(d.weather_code[0], cloud);
+    return {
+      kind, label: WEATHER_LABELS[kind], temp: d.temperature_2m_mean[0], cloud,
+      wind: (d.wind_speed_10m_max[0] ?? 12) * 0.6, precip: (d.precipitation_sum[0] ?? 0) / 6, historical: ymd,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// Local wall-clock parts of an instant in an IANA timezone.
+export function localParts(tz, date = new Date()) {
+  try {
+    const f = new Intl.DateTimeFormat('en-US', { timeZone: tz, hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric' });
+    const p = Object.fromEntries(f.formatToParts(date).map((x) => [x.type, x.value]));
+    return { y: +p.year, mo: +p.month - 1, d: +p.day, h: +p.hour % 24, mi: +p.minute };
+  } catch {
+    return { y: date.getFullYear(), mo: date.getMonth(), d: date.getDate(), h: date.getHours(), mi: date.getMinutes() };
+  }
+}
+
+// The instant when it is the given wall-clock time in tz.
+export function fromLocal(tz, y, mo, d, h, mi) {
+  const guess = Date.UTC(y, mo, d, h, mi);
+  const p = localParts(tz, new Date(guess));
+  const off = Date.UTC(p.y, p.mo, p.d, p.h, p.mi) - guess;
+  return new Date(guess - off);
+}
+
+// Sun height above the horizon in degrees (low-precision solar position, good to ~1°).
+export function solarElevation(date, lat, lon) {
+  const rad = Math.PI / 180;
+  const n = date.getTime() / 86400000 + 2440587.5 - 2451545.0;
+  const g = ((357.529 + 0.98560028 * n) % 360) * rad;
+  const q = (280.459 + 0.98564736 * n) % 360;
+  const L = (q + 1.915 * Math.sin(g) + 0.02 * Math.sin(2 * g)) * rad;
+  const e = (23.439 - 0.00000036 * n) * rad;
+  const ra = Math.atan2(Math.cos(e) * Math.sin(L), Math.cos(L)) / rad / 15;
+  const dec = Math.asin(Math.sin(e) * Math.sin(L));
+  const gmst = (18.697374558 + 24.06570982441908 * n) % 24;
+  const ha = ((gmst + lon / 15 - ra) * 15) * rad;
+  const la = lat * rad;
+  return Math.asin(Math.sin(la) * Math.sin(dec) + Math.cos(la) * Math.cos(dec) * Math.cos(ha)) / rad;
+}
+
+// Moon age as a fraction of the synodic month: 0 new, 0.5 full.
+export function moonPhase(date) {
+  const jd = date.getTime() / 86400000 + 2440587.5;
+  const f = ((jd - 2451550.1) / 29.530588853) % 1;
+  return f < 0 ? f + 1 : f;
+}
+
+// Little seasonal details: string lights in December, diyas around Diwali in South Asia.
+const DIWALI = { 2025: [9, 20], 2026: [10, 8], 2027: [9, 29], 2028: [9, 17], 2029: [10, 5], 2030: [9, 26] };
+const DIWALI_COUNTRIES = ['IN', 'NP', 'LK', 'MY', 'SG', 'MU', 'FJ', 'GY', 'TT'];
+export function festivalFor(place, { y, mo, d }) {
+  const dw = DIWALI[y];
+  if (dw && DIWALI_COUNTRIES.includes(place.country)) {
+    const diff = (Date.UTC(y, mo, d) - Date.UTC(y, dw[0], dw[1])) / 86400000;
+    if (diff >= -3 && diff <= 2) return 'diwali';
+  }
+  if (mo === 11 || (mo === 0 && d <= 6)) return 'christmas';
+  return null;
 }

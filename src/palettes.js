@@ -5,6 +5,7 @@ export const hex = (h) => {
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
 };
 export const mixC = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+const clamp01 = (v) => Math.max(0, Math.min(1, v));
 export const css = (c, a = 1) =>
   a >= 1 ? `rgb(${c[0] | 0},${c[1] | 0},${c[2] | 0})` : `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a.toFixed(3)})`;
 
@@ -114,7 +115,7 @@ const SCENE_DEFAULT_WEATHER = { summer: 'clear', spring: 'clear', autumn: 'clear
  * Flatten season + weather into numbers and colors the renderer can blend.
  * weather === null means "preview": use a typical day for that season.
  */
-export function buildScene(season, weather) {
+export function buildScene(season, weather, tod = { elev: 45, moon: 0.5, festival: null }) {
   const b = BASE[season.key];
   const f = season.flora;
   const kind = weather ? weather.kind : SCENE_DEFAULT_WEATHER[season.key];
@@ -162,12 +163,33 @@ export function buildScene(season, weather) {
     env.skyIn = mixC(env.skyIn, hex('#eef2f4'), 0.5);
   }
 
+  // Time of day from the sun's real height: day → golden dusk/dawn → night.
+  const smooth = (a, b, x) => { const t = clamp01((x - a) / (b - a)); return t * t * (3 - 2 * t); };
+  const day = smooth(-7, 6, tod.elev);
+  const warm = Math.max(0, 1 - Math.abs(tod.elev - 1.5) / 8) * (tod.elev > -8 ? 1 : 0);
+  const night = 1 - day;
+  const overcast = Math.min(1, env.cloudGrey * 1.2 + (env.cloudN > 6 ? 0.3 : 0));
+  env.skyIn = mixC(mixC(env.skyIn, hex('#8d8fc4'), warm * 0.75), hex('#1b2848'), night);
+  env.skyOut = mixC(mixC(env.skyOut, hex('#f2a27c'), warm * 0.85), hex('#070d1d'), night);
+  env.day = day; env.warm = warm;
+  env.dark = night * 0.74;          // foliage fades toward navy silhouettes
+  env.dusk = warm * 0.22 * day;     // and takes a warm cast at golden hour
+  env.stars = night * (1 - overcast * 0.9);
+  env.moon = night * (1 - overcast * 0.7);
+  env.moonPhase = tod.moon;
+  const warmNight = ['summer', 'monsoon'].includes(season.key) || (season.key === 'spring' && season.progress > 0.6);
+  env.fireflies = night * (warmNight && env.rates.rain < 30 ? 1 : 0);
+  env.lights = tod.festival ? 1 : 0;
+  env.lightsKind = tod.festival || 'christmas';
+  env.rates.leaf *= 0.4 + 0.6 * day; env.rates.petal *= 0.4 + 0.6 * day;
+
   const snowy = env.snow > 0.5;
   return {
     season,
     env,
     kind,
-    birds: ['rain', 'heavy', 'storm', 'snow'].includes(kind) ? null : b.birds,
+    birds: ['rain', 'heavy', 'storm', 'snow'].includes(kind) || day < 0.4 ? null : b.birds,
+    night,
     windMul: 0.6 + Math.min(1.6, (weather ? weather.wind : kind === 'storm' ? 30 : 8) / 20),
     foliage: (cl, tree) => FOLIAGE[season.key](cl, tree, season.progress, f, snowy),
   };

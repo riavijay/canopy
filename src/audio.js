@@ -126,8 +126,11 @@ export class Ambience {
     this.cicadaNext = c.currentTime + 4;
   }
 
-  setScene(key, weather) {
-    this.mix = MIX[key] || MIX.summer;
+  setScene(key, weather, night = 0) {
+    this.night = night;
+    this.crickets = night > 0.5 && key !== 'winter' && !(weather && ['rain', 'heavy', 'storm', 'snow'].includes(weather.kind));
+    this.mix = [...(MIX[key] || MIX.summer)];
+    if (night > 0.5) { this.mix[4] = 0; this.mix[5] = 0; } // no cicadas or birdsong at night
     const rain = weather ? { drizzle: 0.25, rain: 0.45, heavy: 0.65, storm: 0.65 }[weather.kind] || 0 : 0;
     this.rainLevel = Math.max(this.mix[3], rain);
     this.applyMix();
@@ -158,6 +161,7 @@ export class Ambience {
     if (!this.on) return;
     const c = this.ctx, t = c.currentTime;
     if (Math.random() < this.mix[5] * 0.25) this.chirp();
+    if (this.crickets && Math.random() < 0.55) this.cricket();
     if (this.mix[4] > 0 && t > this.cicadaNext) {
       const peak = this.mix[4] * (0.5 + Math.random() * 0.5) * 0.35;
       const g = this.cicada.gain;
@@ -188,6 +192,26 @@ export class Ambience {
       o.connect(g).connect(pan);
       o.start(t); o.stop(t + dur + 0.02);
       t += dur + (trill ? 0.015 : 0.05 + Math.random() * 0.08);
+    }
+  }
+
+  // A field cricket: a short train of pure, very high pulses.
+  cricket() {
+    const c = this.ctx, t0 = c.currentTime + Math.random() * 0.2;
+    const f = 4300 + Math.random() * 500;
+    const pan = c.createStereoPanner(); pan.pan.value = Math.random() * 1.8 - 0.9;
+    const out = c.createGain(); out.gain.value = 0.018 + Math.random() * 0.02;
+    pan.connect(out).connect(this.master);
+    const pulses = 3 + Math.floor(Math.random() * 3);
+    for (let i = 0; i < pulses; i++) {
+      const t = t0 + i * 0.045;
+      const o = c.createOscillator(), g = c.createGain();
+      o.frequency.value = f;
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(1, t + 0.006);
+      g.gain.exponentialRampToValueAtTime(0.001, t + 0.03);
+      o.connect(g).connect(pan);
+      o.start(t); o.stop(t + 0.04);
     }
   }
 

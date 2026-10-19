@@ -81,6 +81,10 @@ export class Canopy {
     this.canvas.height = Math.round(H * this.dpr);
     this.canvas.style.width = W + 'px';
     this.canvas.style.height = H + 'px';
+    // Trees are painted on their own layer so night and dusk can tint them without dimming the sky.
+    this.fg = makeCanvas(this.canvas.width, this.canvas.height);
+    this.fgctx = this.fg.getContext('2d');
+    this.mainctx = this.ctx;
     this.generate();
     if (this.scene) {
       for (const c of this.clusters) { c.from = null; c.to = this.scene.foliage(c, c.tree); this.paintClump(c, 'to'); }
@@ -108,6 +112,7 @@ export class Canopy {
     this.cx = W / 2; this.cy = H * 0.5;
     this.hole = { a: 0.1 * W + 0.05 * m, b: 0.12 * H + 0.05 * m, p: [r() * TAU, r() * TAU, r() * TAU] };
     this.trees = []; this.clusters = []; this.clouds = [];
+    this.stars = []; this.flies = []; this.bulbs = []; this.glows = {}; this.moonPos = { x: 0, y: 0 };
     if (W <= 0 || H <= 0) return;
     const depthFactor = (x, y) => clamp(Math.hypot(x - this.cx, y - this.cy) / (0.6 * M), 0, 1.3);
 
@@ -187,6 +192,20 @@ export class Canopy {
     this.clusters.sort((a, b) => a.rr - b.rr);
 
     this.clouds = Array.from({ length: 12 }, (_, i) => this.makeCloud(r, i));
+    this.stars = Array.from({ length: 220 }, () => ({ x: r() * W, y: r() * H, s: 0.4 + r() * r() * 1.6, ph: r() * TAU, tw: 0.5 + r() * 2 }));
+    this.moonPos = { x: this.cx + this.hole.a * 0.35, y: this.cy - this.hole.b * 0.4 };
+    this.flies = Array.from({ length: 36 }, () => ({ x: r() * W, y: r() * H, ph: r() * TAU, sp: 0.3 + r() * 0.7, blink: 0.4 + r() * 0.8 }));
+    // String-light bulbs threaded along the bigger limbs.
+    this.bulbs = [];
+    for (const tr of this.trees) {
+      if (r() < 0.45) continue; // only some trees are wrapped
+      for (const b of tr.branches) {
+        if (b.depth > 1) continue;
+        for (let k = 1; k < b.pts.length; k += 2) this.bulbs.push({ tr, b, k, t: r(), ph: r() * TAU, c: (r() * 5) | 0 });
+      }
+      for (let k = 8; k < tr.trunk.length; k += 3) this.bulbs.push({ tr, b: { pts: tr.trunk }, k, t: r(), ph: r() * TAU, c: (r() * 5) | 0 });
+    }
+    this.glows = {};
   }
 
   grow(tree, r, p0, ang, len, w, depth, s0, depthFactor) {
@@ -329,12 +348,14 @@ export class Canopy {
     return {
       x: r() * this.W, y: this.cy + (r() - 0.5) * this.H * 0.5, w, h, speed: 4 + r() * 8, vis: 0, i,
       white: paint([255, 255, 255], [196, 214, 228]), grey: paint([205, 212, 217], [120, 134, 145]),
+      warm: paint([255, 222, 200], [228, 140, 128]), night: paint([62, 72, 98], [34, 41, 60]),
     };
   }
 
   // ---------- scene changes ----------
 
-  setScene(scene, instant = false) {
+  setScene(scene, instant = false, duration = 2.6) {
+    this.mixDur = duration;
     const prev = this.scene;
     this.scene = scene;
     const same = (a, b) => a && b && a.s === b.s && a.mid === b.mid && a.mt === b.mt && a.green === b.green && a.glow === b.glow;
@@ -389,7 +410,7 @@ export class Canopy {
     if (innerWidth !== this.W || innerHeight !== this.H) this.resize();
     const P = this.pointer;
     if (this.mix < 1) {
-      this.mix = Math.min(1, this.mix + dt / 2.6);
+      this.mix = Math.min(1, this.mix + dt / (this.mixDur || 2.6));
       const e = ease(this.mix);
       this.env = blendEnv(this.envFrom, this.envTo, e);
       this.paintLooks(e);
@@ -620,17 +641,37 @@ export class Canopy {
     sky.addColorStop(1, css(env.skyOut));
     ctx.fillStyle = sky;
     ctx.fillRect(0, 0, W, H);
+    if (env.stars > 0.01) this.drawStars(env);
+    if (env.moon > 0.01) this.drawMoon(env);
     if (this.flash > 0) { ctx.fillStyle = `rgba(235,240,255,${(this.flash * 0.55).toFixed(3)})`; ctx.fillRect(0, 0, W, H); }
 
     this.drawClouds(env);
     this.drawBirds();
+
+    // Trees, leaves and falling things on their own layer, tinted for the time of day.
+    const fg = this.fgctx;
+    fg.setTransform(1, 0, 0, 1, 0, 0);
+    fg.clearRect(0, 0, this.fg.width, this.fg.height);
+    this.ctx = fg;
     for (const c of this.clusters) this.drawClump(c);
     for (const tr of this.trees) this.drawTree(tr, env);
     for (const c of this.clusters) this.drawFront(c);
+    this.drawParticles(true);
+    fg.setTransform(1, 0, 0, 1, 0, 0);
+    fg.globalCompositeOperation = 'source-atop';
+    if (env.dusk > 0.005) { fg.fillStyle = `rgba(255,138,80,${env.dusk.toFixed(3)})`; fg.fillRect(0, 0, this.fg.width, this.fg.height); }
+    if (env.dark > 0.005) { fg.fillStyle = `rgba(10,17,36,${env.dark.toFixed(3)})`; fg.fillRect(0, 0, this.fg.width, this.fg.height); }
+    if (this.flash > 0 && env.dark > 0.1) { fg.fillStyle = `rgba(220,230,255,${(this.flash * 0.4).toFixed(3)})`; fg.fillRect(0, 0, this.fg.width, this.fg.height); }
+    fg.globalCompositeOperation = 'source-over';
+    this.ctx = this.mainctx;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.drawImage(this.fg, 0, 0);
 
+    if (env.lights > 0.01) this.drawLights(env);
+    if (env.fireflies > 0.01) this.drawFireflies(env);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    if (env.tintA > 0.005) { ctx.fillStyle = css(env.tint, env.tintA); ctx.fillRect(0, 0, W, H); }
-    this.drawParticles();
+    if (env.tintA > 0.005) { ctx.fillStyle = css(env.tint, env.tintA * (0.4 + 0.6 * env.day)); ctx.fillRect(0, 0, W, H); }
+    this.drawParticles(false);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     if (env.fog > 0.005) { ctx.fillStyle = `rgba(242,246,247,${env.fog.toFixed(3)})`; ctx.fillRect(0, 0, W, H); }
     if (this.flash > 0) { ctx.fillStyle = `rgba(240,245,255,${(this.flash * 0.3).toFixed(3)})`; ctx.fillRect(0, 0, W, H); }
@@ -644,9 +685,94 @@ export class Canopy {
       const s = env.cloudScale;
       const w = c.white.width * 2 * s, h = c.white.height * 2 * s;
       const x = c.x - this.par.x * 4 - w / 2, y = c.y - this.par.y * 4 - h * 0.62;
-      if (env.cloudGrey < 0.98) { ctx.globalAlpha = c.vis * (1 - env.cloudGrey); ctx.drawImage(c.white, x, y, w, h); }
-      if (env.cloudGrey > 0.02) { ctx.globalAlpha = c.vis * env.cloudGrey; ctx.drawImage(c.grey, x, y, w, h); }
+      const n = 1 - env.day, warmW = env.warm * env.day, dayW = Math.max(0, 1 - n - warmW);
+      const layers = [[c.white, dayW * (1 - env.cloudGrey)], [c.grey, dayW * env.cloudGrey], [c.warm, warmW], [c.night, n]];
+      for (const [img, wgt] of layers) {
+        if (wgt < 0.02) continue;
+        ctx.globalAlpha = c.vis * Math.min(1, wgt);
+        ctx.drawImage(img, x, y, w, h);
+      }
     }
+    ctx.globalAlpha = 1;
+  }
+
+  drawStars(env) {
+    const { ctx, t } = this;
+    ctx.fillStyle = '#fbf7ea';
+    for (const st of this.stars) {
+      const a = env.stars * (0.45 + 0.55 * Math.sin(t * st.tw + st.ph) ** 2);
+      ctx.globalAlpha = a;
+      ctx.beginPath(); ctx.arc(st.x, st.y, st.s, 0, TAU); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // The moon in its real phase for the date: a lit disk with the terminator as a half-ellipse.
+  drawMoon(env) {
+    const { ctx, m, dpr } = this;
+    const R = m * 0.035, { x, y } = this.moonPos;
+    const a = env.moon;
+    const glow = ctx.createRadialGradient(x, y, R * 0.8, x, y, R * 6);
+    const lit = 1 - Math.abs(env.moonPhase - 0.5) * 2; // 0 new → 1 full
+    glow.addColorStop(0, `rgba(230,236,255,${(0.35 * a * (0.3 + 0.7 * lit)).toFixed(3)})`);
+    glow.addColorStop(1, 'rgba(230,236,255,0)');
+    ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(x, y, R * 6, 0, TAU); ctx.fill();
+    ctx.globalAlpha = a * 0.18;
+    ctx.fillStyle = '#c9cfdf'; ctx.beginPath(); ctx.arc(x, y, R, 0, TAU); ctx.fill();
+    const p = env.moonPhase, k = Math.cos(p * TAU);
+    ctx.setTransform(dpr * (p < 0.5 ? 1 : -1), 0, 0, dpr, x * dpr, y * dpr);
+    ctx.globalAlpha = a;
+    ctx.fillStyle = '#f6f2e2';
+    ctx.beginPath();
+    ctx.arc(0, 0, R, -Math.PI / 2, Math.PI / 2);
+    ctx.ellipse(0, 0, Math.max(0.01, R * Math.abs(k)), R, 0, Math.PI / 2, -Math.PI / 2, k > 0);
+    ctx.fill();
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.globalAlpha = 1;
+  }
+
+  glowSprite(color) {
+    if (this.glows[color]) return this.glows[color];
+    const S = 48, cv = makeCanvas(S, S), g = cv.getContext('2d');
+    const gr = g.createRadialGradient(S / 2, S / 2, 0, S / 2, S / 2, S / 2);
+    gr.addColorStop(0, '#ffffff'); gr.addColorStop(0.12, color); gr.addColorStop(0.35, color + '66'); gr.addColorStop(1, color + '00');
+    g.fillStyle = gr; g.fillRect(0, 0, S, S);
+    return (this.glows[color] = cv);
+  }
+
+  // Festive string lights on the limbs; they glow brighter as it gets dark.
+  drawLights(env) {
+    const { ctx, dpr, t, m } = this;
+    const colors = env.lightsKind === 'diwali' ? ['#ffcf6b', '#ffb347', '#ffe08a', '#ff9e3d', '#fff0b3'] : ['#ff5b5b', '#ffd45a', '#5ccfff', '#7dff92', '#ff9be0'];
+    const size = m * (0.014 + 0.014 * (1 - env.day));
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.globalCompositeOperation = 'lighter';
+    for (const bl of this.bulbs) {
+      const pts = bl.b.pts, a = pts[bl.k - 1], b = pts[bl.k];
+      if (!a || !b) continue;
+      const f = Math.pow(clamp(lerp(a.s, b.s, bl.t), 0, 1.4), 1.5);
+      const x = lerp(a.x, b.x, bl.t) + bl.tr.sx * f - this.par.x * 12 * a.df, y = lerp(a.y, b.y, bl.t) + bl.tr.sy * f - this.par.y * 12 * a.df;
+      const tw = 0.55 + 0.45 * Math.sin(t * 1.6 + bl.ph);
+      ctx.globalAlpha = env.lights * tw * (0.35 + 0.4 * (1 - env.day));
+      ctx.drawImage(this.glowSprite(colors[bl.c]), x - size / 2, y - size / 2, size, size);
+    }
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+  }
+
+  drawFireflies(env) {
+    const { ctx, dpr, t, m } = this;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.globalCompositeOperation = 'lighter';
+    const spr = this.glowSprite('#d8ff6a'), size = m * 0.03;
+    for (const f of this.flies) {
+      const x = f.x + Math.sin(t * f.sp + f.ph) * m * 0.05, y = f.y + Math.cos(t * f.sp * 0.8 + f.ph * 2) * m * 0.04;
+      const blink = Math.max(0, Math.sin(t * f.blink + f.ph)) ** 3;
+      if (blink < 0.02) continue;
+      ctx.globalAlpha = env.fireflies * blink;
+      ctx.drawImage(spr, x - size / 2, y - size / 2, size, size);
+    }
+    ctx.globalCompositeOperation = 'source-over';
     ctx.globalAlpha = 1;
   }
 
@@ -766,15 +892,18 @@ export class Canopy {
       for (let k = 1; k < trunk.length - 4; k++) {
         if (r() > 0.32) continue;
         const a = trunk[k], b = trunk[k + 1];
-        const seg = [a, { x: lerp(a.x, b.x, 0.5 + r() * 0.5), y: lerp(a.y, b.y, 0.5 + r() * 0.5), w: b.w }];
-        this.ribbon(seg, 0, 0.75 + r() * 0.25);
+        // Thin horizontal stripes across the trunk, like birch bark.
+        const t0 = r() * 0.6, t1 = t0 + 0.12 + r() * 0.15;
+        const seg = [{ x: lerp(a.x, b.x, t0), y: lerp(a.y, b.y, t0), w: a.w }, { x: lerp(a.x, b.x, t1), y: lerp(a.y, b.y, t1), w: a.w }];
+        this.ribbon(seg, 0, 1.02);
       }
     }
   }
 
-  drawParticles() {
+  drawParticles(foreground) {
     const { ctx, dpr } = this;
     for (const p of this.particles) {
+      if ((p.type === 'rain') === foreground) continue;
       if (p.type === 'rain') {
         const k0 = Math.max(0, p.k - 0.14);
         const x0 = this.cx + p.rx * (1 + k0 * 1.9), y0 = this.cy + p.ry * (1 + k0 * 1.9);
