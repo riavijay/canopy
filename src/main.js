@@ -144,8 +144,59 @@ function renderPanel() {
   hourEl.style.background = `linear-gradient(90deg, ${hs.join(',')})`;
 
   for (const b of document.querySelectorAll('#units button')) b.setAttribute('aria-pressed', String(b.dataset.u === unit()));
+  renderWeatherCard();
   $('note').textContent = (home && home.source === 'timezone' ? 'We guessed your city from your timezone. ' : '') +
-    'Live and past weather plus city search from Open-Meteo; the sun and moon are worked out for the exact spot.';
+    'The sun and moon are worked out for the exact spot and minute.';
+}
+
+// The actual readings behind the sky, with where and when they came from.
+const COMPASS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+const isoClock = (iso) => { if (!iso) return '–'; const [h, mi] = iso.slice(11, 16).split(':').map(Number); return clock(h, mi); };
+function renderWeatherCard() {
+  const { m, w } = current;
+  const F = unit() === 'F';
+  const t = (c) => (c == null ? '–' : `${Math.round(F ? (c * 9) / 5 + 32 : c)}°`);
+  const speed = (k) => (k == null ? '–' : F ? `${Math.round(k * 0.621)} mph` : `${Math.round(k)} km/h`);
+  const rain = (mm) => (mm == null ? '–' : F ? `${(mm / 25.4).toFixed(2)} in` : `${mm.toFixed(1)} mm`);
+  const name = place.city || 'your sky';
+  $('wxTitle').textContent = w && w.historical
+    ? `${name} on ${MONTHS[+w.historical.slice(5, 7) - 1].slice(0, 3)} ${+w.historical.slice(8)}, ${w.historical.slice(0, 4)}`
+    : `Right now in ${name}`;
+  if (!w) {
+    $('wxTemp').textContent = '–';
+    $('wxCond').textContent = m.live ? 'Checking the sky…' : 'Digging up last year’s weather…';
+    $('wxSub').textContent = ''; $('wxGrid').textContent = ''; $('wxSrc').textContent = '';
+    return;
+  }
+  const d = w.details || {};
+  $('wxTemp').textContent = t(w.temp);
+  $('wxCond').textContent = w.label;
+  $('wxSub').textContent = w.historical ? `High ${t(d.high)} · Low ${t(d.low)}` : d.feels != null ? `Feels like ${t(d.feels)}` : '';
+  const cells = w.historical
+    ? [['Rain that day', rain(d.rainMm)], ['Top wind', speed(d.windKmh)], ['Cloud cover', `${Math.round(d.cloud ?? 0)}%`], ['Sunrise', isoClock(d.sunrise)], ['Sunset', isoClock(d.sunset)]]
+    : [['Humidity', d.humidity == null ? '–' : `${Math.round(d.humidity)}%`],
+       ['Wind', d.windKmh == null ? '–' : `${speed(d.windKmh)} ${COMPASS[Math.round((d.windDir ?? 0) / 45) % 8]}`],
+       ['Rain', rain(d.rainMm)], ['Cloud cover', `${Math.round(d.cloud ?? 0)}%`], ['Sunrise', isoClock(d.sunrise)], ['Sunset', isoClock(d.sunset)]];
+  const grid = $('wxGrid');
+  grid.textContent = '';
+  for (const [k, v] of cells) {
+    const div = document.createElement('div'), dt = document.createElement('dt'), dd = document.createElement('dd');
+    dt.textContent = k; dd.textContent = v; div.append(dt, dd); grid.append(div);
+  }
+  const where = d.lat != null ? ` Nearest weather grid point: ${Math.abs(d.lat).toFixed(2)}°${d.lat >= 0 ? 'N' : 'S'}, ${Math.abs(d.lon).toFixed(2)}°${d.lon >= 0 ? 'E' : 'W'}.` : '';
+  const src = $('wxSrc');
+  src.textContent = '';
+  if (w.fake) { src.textContent = 'Preview weather set from the link, not a live reading.'; return; }
+  let lead;
+  if (w.historical) lead = 'Recorded weather from the Open-Meteo historical archive (ERA5 reanalysis).';
+  else {
+    const mins = Math.max(0, Math.round((Date.now() - (d.fetchedAt || Date.now())) / 60000));
+    lead = `Live reading${d.observed ? ` from ${isoClock(d.observed)}` : ''}, updated ${mins < 1 ? 'just now' : `${mins} min ago`}. Source: `;
+  }
+  const a = document.createElement('a');
+  a.href = 'https://open-meteo.com/'; a.target = '_blank'; a.rel = 'noopener'; a.textContent = 'Open-Meteo';
+  if (w.historical) src.append(lead + where);
+  else src.append(lead, a, ', built on national weather models (NOAA, DWD, ECMWF and more).' + where);
 }
 
 let slideT = 0;
@@ -214,7 +265,7 @@ function togglePanel(open = !panel.classList.contains('open')) {
   panel.classList.toggle('open', open);
   chip.setAttribute('aria-expanded', String(open));
 }
-chip.addEventListener('click', (e) => { e.stopPropagation(); togglePanel(); });
+chip.addEventListener('click', (e) => { e.stopPropagation(); togglePanel(); if (panel.classList.contains('open') && current) renderPanel(); });
 panel.addEventListener('pointerdown', (e) => e.stopPropagation());
 for (const b of document.querySelectorAll('#units button')) {
   b.addEventListener('click', (e) => {

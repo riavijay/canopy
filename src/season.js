@@ -249,7 +249,8 @@ export function fakeWeather(kind) {
 export async function fetchWeather(lat, lon) {
   try {
     const u = `https://api.open-meteo.com/v1/forecast?latitude=${lat.toFixed(2)}&longitude=${lon.toFixed(2)}` +
-      `&current=temperature_2m,weather_code,cloud_cover,wind_speed_10m,wind_gusts_10m,precipitation,is_day&timezone=auto`;
+      `&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,cloud_cover,wind_speed_10m,wind_direction_10m,wind_gusts_10m,precipitation,is_day` +
+      `&daily=sunrise,sunset&forecast_days=1&timezone=auto`;
     const r = await fetch(u, { signal: withTimeout(5000) });
     if (!r.ok) return null;
     const j = await r.json();
@@ -263,6 +264,13 @@ export async function fetchWeather(lat, lon) {
       wind: Math.max(c.wind_speed_10m ?? 8, (c.wind_gusts_10m ?? 0) * 0.6),
       precip: c.precipitation ?? 0,
       isDay: c.is_day === 1,
+      // The raw readings, shown in the weather card so people can see where the sky comes from.
+      details: {
+        feels: c.apparent_temperature, humidity: c.relative_humidity_2m, windKmh: c.wind_speed_10m,
+        windDir: c.wind_direction_10m, gustKmh: c.wind_gusts_10m, rainMm: c.precipitation, cloud,
+        sunrise: j.daily?.sunrise?.[0], sunset: j.daily?.sunset?.[0], observed: c.time, fetchedAt: Date.now(),
+        lat: j.latitude, lon: j.longitude, elevation: j.elevation,
+      },
     };
   } catch {
     return null;
@@ -287,16 +295,22 @@ export async function searchPlaces(q, signal) {
 export async function fetchHistory(lat, lon, ymd) {
   try {
     const u = `https://archive-api.open-meteo.com/v1/archive?latitude=${lat.toFixed(2)}&longitude=${lon.toFixed(2)}` +
-      `&start_date=${ymd}&end_date=${ymd}&daily=weather_code,temperature_2m_mean,precipitation_sum,cloud_cover_mean,wind_speed_10m_max&timezone=auto`;
+      `&start_date=${ymd}&end_date=${ymd}&daily=weather_code,temperature_2m_mean,temperature_2m_max,temperature_2m_min,precipitation_sum,cloud_cover_mean,wind_speed_10m_max,sunrise,sunset&timezone=auto`;
     const r = await fetch(u, { signal: withTimeout(6000) });
     if (!r.ok) return null;
-    const d = (await r.json()).daily;
+    const j = await r.json();
+    const d = j.daily;
     if (!d || d.weather_code[0] == null) return null;
     const cloud = d.cloud_cover_mean[0] ?? 50;
     const kind = weatherFromCode(d.weather_code[0], cloud);
     return {
       kind, label: WEATHER_LABELS[kind], temp: d.temperature_2m_mean[0], cloud,
       wind: (d.wind_speed_10m_max[0] ?? 12) * 0.6, precip: (d.precipitation_sum[0] ?? 0) / 6, historical: ymd,
+      details: {
+        high: d.temperature_2m_max[0], low: d.temperature_2m_min[0], rainMm: d.precipitation_sum[0],
+        windKmh: d.wind_speed_10m_max[0], cloud, sunrise: d.sunrise?.[0], sunset: d.sunset?.[0],
+        lat: j.latitude, lon: j.longitude, elevation: j.elevation,
+      },
     };
   } catch {
     return null;
