@@ -87,9 +87,9 @@ export class Canopy {
     this.mainctx = this.ctx;
     this.generate();
     if (this.scene) {
-      for (const c of this.clusters) { c.from = null; c.to = this.scene.foliage(c, c.tree); this.paintClump(c, 'to'); }
+      this.queue = new Set();
+      for (const c of this.clusters) { c.from = null; c.pending = null; c.to = this.scene.foliage(c, c.tree); this.paintClump(c, 'to'); this.setLook(c, 1); }
       this.mix = 1;
-      this.paintLooks(1);
     }
   }
 
@@ -303,7 +303,10 @@ export class Canopy {
       }
       for (const { p, col } of paths.values()) { g.fillStyle = col; g.fill(p); }
     }
-    c[key] = { cv, E, sc };
+    const sprite = { cv, E, sc, img: cv };
+    c[key] = sprite;
+    // Hand the GPU a ready-made bitmap in the background so the first draw doesn't stall a frame.
+    if (typeof createImageBitmap === 'function') createImageBitmap(cv).then((bmp) => { sprite.img = bmp; }, () => {});
 
     // A few dabs painted over the branches, so twigs disappear into the leaves.
     if (which === 'to') {
@@ -358,42 +361,68 @@ export class Canopy {
     this.mixDur = duration;
     const prev = this.scene;
     this.scene = scene;
-    const same = (a, b) => a && b && a.s === b.s && a.mid === b.mid && a.mt === b.mt && a.green === b.green && a.glow === b.glow;
     if (!prev || instant) {
       this.envFrom = this.envTo = this.env = scene.env;
       this.mix = 1;
+      this.queue = new Set();
       for (const c of this.clusters) {
         const next = scene.foliage(c, c.tree);
-        if (!same(c.to, next)) { c.to = next; this.paintClump(c, 'to'); }
-        c.from = null; c.spriteFrom = null;
+        if (!this.sameLook(c.to, next)) { c.to = next; this.paintClump(c, 'to'); }
+        c.from = null; c.spriteFrom = null; c.pending = null;
+        this.setLook(c, 1);
       }
       for (const cl of this.clouds) cl.vis = cl.i < scene.env.cloudN ? 1 : 0;
-      this.paintLooks(1);
       return;
     }
     this.envFrom = this.env;
     this.envTo = scene.env;
     this.mix = 0;
+    // Clumps whose foliage changes are repainted a few per frame (see flushQueue), each with its own
+    // short crossfade, so scrubbing through the year never stalls a frame.
+    this.clumpFade = Math.max(0.4, Math.min(duration, 1.6));
+    if (!this.queue) this.queue = new Set();
     for (const c of this.clusters) {
       const next = scene.foliage(c, c.tree);
-      if (same(c.to, next)) { c.from = null; c.spriteFrom = null; continue; }
-      c.from = c.to; c.spriteFrom = c.spriteTo;
-      c.to = next; this.paintClump(c, 'to');
+      if (this.sameLook(c.pending || c.to, next)) continue;
+      c.pending = next;
+      this.queue.add(c);
     }
-    this.paintLooks(0);
   }
 
-  paintLooks(e) {
-    for (const c of this.clusters) {
-      const a = c.from, b = c.to;
-      const bVisible = b && b.s > 0.02;
-      c.fadeIn = a ? e : 1;
-      c.fadeOut = a ? (bVisible ? 1 : 1 - e) : 0;
-      if (e >= 1) { c.from = null; c.spriteFrom = null; c.fadeOut = 0; }
-      const L = bVisible ? b : a;
-      c.look = L;
-      c.paint = bVisible ? { light: css(b.light), glow: css(b.glow) } : null;
+  sameLook(a, b) {
+    return a && b && a.s === b.s && a.mid === b.mid && a.mt === b.mt && a.green === b.green && a.glow === b.glow;
+  }
+
+  flushQueue(budgetMs) {
+    if (!this.queue || !this.queue.size) return;
+    const t0 = performance.now();
+    let n = 0;
+    for (const c of this.queue) {
+      // New sprites are uploaded to the GPU on first draw, so cap how many appear per frame too.
+      if (++n > 5) break;
+      this.queue.delete(c);
+      const next = c.pending;
+      c.pending = null;
+      if (!next || this.sameLook(c.to, next)) continue;
+      // If a fade is still running, keep whichever image is currently the stronger one as the start.
+      if (!(c.from && c.fp < 0.5)) { c.from = c.to; c.spriteFrom = c.spriteTo; }
+      c.to = next;
+      this.paintClump(c, 'to');
+      c.fp = 0;
+      this.setLook(c, 0);
+      if (performance.now() - t0 > budgetMs) break;
     }
+  }
+
+  setLook(c, e) {
+    const a = c.from, b = c.to;
+    const bVisible = b && b.s > 0.02;
+    c.fadeIn = a ? e : 1;
+    c.fadeOut = a ? (bVisible ? 1 : 1 - e) : 0;
+    if (e >= 1) { c.from = null; c.spriteFrom = null; c.fadeOut = 0; c.fadeIn = 1; }
+    const L = bVisible ? b : a;
+    c.look = L;
+    c.paint = bVisible ? { light: css(b.light), glow: css(b.glow) } : null;
   }
 
   // ---------- simulation ----------
@@ -411,9 +440,13 @@ export class Canopy {
     const P = this.pointer;
     if (this.mix < 1) {
       this.mix = Math.min(1, this.mix + dt / (this.mixDur || 2.6));
-      const e = ease(this.mix);
-      this.env = blendEnv(this.envFrom, this.envTo, e);
-      this.paintLooks(e);
+      this.env = blendEnv(this.envFrom, this.envTo, ease(this.mix));
+    }
+    this.flushQueue(5);
+    for (const c of this.clusters) {
+      if (!c.from) continue;
+      c.fp = Math.min(1, (c.fp || 0) + dt / (this.clumpFade || 1));
+      this.setLook(c, ease(c.fp));
     }
     const env = this.env;
     if (!env) return;
@@ -813,7 +846,7 @@ export class Canopy {
       const M = this.clumpMatrix(c, s / sp.sc);
       ctx.setTransform(M[0], M[1], -M[1], M[0], M[2], M[3]);
       ctx.globalAlpha = alpha;
-      ctx.drawImage(sp.cv, -sp.E * sp.sc, -sp.E * sp.sc);
+      ctx.drawImage(sp.img, -sp.E * sp.sc, -sp.E * sp.sc);
     }
     ctx.globalAlpha = 1;
   }

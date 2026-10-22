@@ -11,12 +11,14 @@ const canopy = new Canopy($('c'));
 const audio = new Ambience();
 canopy.onThunder = (d) => audio.thunder(d);
 if (import.meta.env.DEV) window.__canopy = canopy;
+if (import.meta.env.DEV) queueMicrotask(() => { window.__render = (d) => render(d); });
 
 // ---------- state ----------
-// home: where the visitor is. place: the sky on screen. monthOv / hourOv: slider overrides (null = now).
+// home: where the visitor is. place: the sky on screen. dayOv (day of year) / hourOv: slider overrides (null = now).
 let home = null;
 let place = null;
-let monthOv = null, hourOv = null;
+let dayOv = null, hourOv = null;
+const dayOfYear = (y, mo, d) => Math.round((Date.UTC(y, mo, d) - Date.UTC(y, 0, 1)) / 86400000);
 const liveCache = new Map(); // place key → { w, at }
 const histCache = new Map(); // place key + date → weather that day
 const query = new URLSearchParams(location.search);
@@ -35,11 +37,12 @@ const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 
 function moment() {
   const tz = place.tz || browserTz;
   const now = localParts(tz);
-  if (monthOv === null && hourOv === null) return { date: new Date(), lp: now, live: true, tz };
-  const y = now.y, mo = monthOv ?? now.mo;
-  const d = Math.min(now.d, new Date(y, mo + 1, 0).getDate());
+  if (dayOv === null && hourOv === null) return { date: new Date(), lp: now, live: true, tz };
+  const y = now.y;
+  let mo = now.mo, d = now.d;
+  if (dayOv !== null) { const dd = new Date(Date.UTC(y, 0, 1 + dayOv)); mo = dd.getUTCMonth(); d = dd.getUTCDate(); }
   const h = hourOv === null ? now.h : Math.floor(hourOv / 4), mi = hourOv === null ? now.mi : (hourOv % 4) * 15;
-  return { date: fromLocal(tz, y, mo, d, h, mi), lp: { y, mo, d, h, mi }, live: monthOv === null, tz };
+  return { date: fromLocal(tz, y, mo, d, h, mi), lp: { y, mo, d, h, mi }, live: dayOv === null, tz };
 }
 
 // For another month, the most recent past date with that day — the archive lags by about a week.
@@ -120,28 +123,38 @@ const SEASON_COLORS = { spring: '#f3a8c4', summer: '#7cc24f', monsoon: '#4f8f8a'
 function renderPanel() {
   const { m, season } = current;
   const monthEl = $('month'), hourEl = $('hour');
-  if (document.activeElement !== monthEl) monthEl.value = m.lp.mo;
+  if (document.activeElement !== monthEl) monthEl.value = dayOfYear(m.lp.y, m.lp.mo, m.lp.d);
   if (document.activeElement !== hourEl) hourEl.value = m.lp.h * 4 + Math.floor(m.lp.mi / 15);
-  $('monthLabel').textContent = MONTHS[m.lp.mo];
+  $('monthLabel').textContent = `${MONTHS[m.lp.mo]} ${m.lp.d}`;
   $('monthSeason').textContent = season.label;
   $('hourLabel').textContent = clock(m.lp.h, m.lp.mi);
-  $('now').hidden = monthOv === null && hourOv === null;
+  $('now').hidden = dayOv === null && hourOv === null;
   $('mysky').hidden = !home || place === home;
 
   // The month track shows this place's seasons; the time track shows its real sunrise and sunset.
-  const stops = [];
-  for (let i = 0; i < 12; i++) {
-    const c = SEASON_COLORS[seasonFor(place, new Date(m.lp.y, i, 15)).key];
-    stops.push(`${c} ${(i / 12) * 100}%`, `${c} ${((i + 1) / 12) * 100}%`);
+  // Both are cached so scrubbing doesn't recompute them every frame.
+  const mKey = `${keyOf(place)}|${m.lp.y}`;
+  if (monthEl.dataset.key !== mKey) {
+    const stops = [];
+    for (let i = 0; i < 12; i++) {
+      const c = SEASON_COLORS[seasonFor(place, new Date(m.lp.y, i, 15)).key];
+      stops.push(`${c} ${(i / 12) * 100}%`, `${c} ${((i + 1) / 12) * 100}%`);
+    }
+    monthEl.style.background = `linear-gradient(90deg, ${stops.join(',')})`;
+    monthEl.dataset.key = mKey;
   }
-  monthEl.style.background = `linear-gradient(90deg, ${stops.join(',')})`;
-  const tz = m.tz, hs = [];
-  for (let i = 0; i <= 24; i++) {
-    const e = solarElevation(fromLocal(tz, m.lp.y, m.lp.mo, m.lp.d, i % 24, 0), place.lat, place.lon);
-    const c = e > 8 ? '#8ccbee' : e > -1 ? '#f2a77e' : e > -7 ? '#8d8fc4' : '#1f2b4a';
-    hs.push(`${c} ${(i / 24) * 100}%`);
+  const hKey = `${keyOf(place)}|${m.lp.y}-${m.lp.mo}-${Math.floor(m.lp.d / 4)}`;
+  if (hourEl.dataset.key !== hKey) {
+    const tz = m.tz, hs = [];
+    const base = fromLocal(tz, m.lp.y, m.lp.mo, m.lp.d, 0, 0).getTime();
+    for (let i = 0; i <= 24; i++) {
+      const e = solarElevation(new Date(base + i * 3600000), place.lat, place.lon);
+      const c = e > 8 ? '#8ccbee' : e > -1 ? '#f2a77e' : e > -7 ? '#8d8fc4' : '#1f2b4a';
+      hs.push(`${c} ${(i / 24) * 100}%`);
+    }
+    hourEl.style.background = `linear-gradient(90deg, ${hs.join(',')})`;
+    hourEl.dataset.key = hKey;
   }
-  hourEl.style.background = `linear-gradient(90deg, ${hs.join(',')})`;
 
   for (const b of document.querySelectorAll('#units button')) b.setAttribute('aria-pressed', String(b.dataset.u === unit()));
   renderWeatherCard();
@@ -199,22 +212,23 @@ function renderWeatherCard() {
   else src.append(lead, a, ', built on national weather models (NOAA, DWD, ECMWF and more).' + where);
 }
 
-let slideT = 0;
+// Coalesce slider input to one render per frame; leaves repaint gradually in the renderer.
+let slidePending = false;
 function onSlide() {
-  const now = performance.now();
-  if (now - slideT < 120) return;
-  slideT = now;
-  render(0.6);
-  ensureWeatherSoon();
+  if (slidePending) return;
+  slidePending = true;
+  requestAnimationFrame(() => { slidePending = false; render(0.5); });
 }
 $('month').addEventListener('input', (e) => {
   const v = +e.target.value;
-  monthOv = v === localParts(place.tz || browserTz).mo && hourOv === null ? null : v;
+  const now = localParts(place.tz || browserTz);
+  dayOv = v === dayOfYear(now.y, now.mo, now.d) && hourOv === null ? null : v;
   onSlide();
 });
 $('hour').addEventListener('input', (e) => { hourOv = +e.target.value; onSlide(); });
-for (const id of ['month', 'hour']) $(id).addEventListener('change', () => { slideT = 0; render(0.6); ensureWeatherSoon(); });
-$('now').addEventListener('click', () => { monthOv = hourOv = null; render(1.5); ensureWeather(); });
+// Past weather is fetched once you let go, not on every day you pass.
+for (const id of ['month', 'hour']) $(id).addEventListener('change', () => { render(0.5); ensureWeatherSoon(); });
+$('now').addEventListener('click', () => { dayOv = hourOv = null; render(1.5); ensureWeather(); });
 $('mysky').addEventListener('click', () => goTo(home));
 
 function goTo(p) {
@@ -336,7 +350,7 @@ function frame(now) {
 }
 // Keep "now" in step with the real clock: the sky drifts with the sun, weather refreshes.
 setInterval(() => {
-  if (place && monthOv === null && hourOv === null) { render(4); ensureWeather(); }
+  if (place && dayOv === null && hourOv === null) { render(4); ensureWeather(); }
 }, 60 * 1000);
 
 // ---------- boot ----------
@@ -350,7 +364,7 @@ setInterval(() => {
   home = { ...found, tz: found.tz || (found.source === 'timezone' || found.source === 'default' ? browserTz : undefined) };
   place = home;
   const qm = query.get('month'), qh = query.get('hour');
-  if (qm !== null && qm !== '') monthOv = Math.max(0, Math.min(11, +qm - 1));
+  if (qm !== null && qm !== '') dayOv = dayOfYear(new Date().getFullYear(), Math.max(0, Math.min(11, +qm - 1)), 15);
   if (qh !== null && qh !== '') hourOv = Math.max(0, Math.min(95, Math.round(+qh * 4)));
   render(1.5);
   ensureWeather();
